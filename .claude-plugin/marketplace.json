@@ -1,0 +1,15 @@
+{
+  "name": "x402socks",
+  "owner": {
+    "name": "x402socks",
+    "url": "https://github.com/x402socks"
+  },
+  "plugins": [
+    {
+      "name": "x402socks",
+      "source": "./",
+      "description": "Buy and use anonymous SOCKS5/HTTP proxy egress for agents, paid per-job in USDC over x402.",
+      "version": "1.0.0"
+    }
+  ]
+}
