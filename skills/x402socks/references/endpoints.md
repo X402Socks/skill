@@ -39,7 +39,7 @@ All shapes below were verified against the live service. Fields are additive-com
 }
 ```
 
-Filter on `disabled == false` and `health == "healthy"`. The feed contains entries that are intentionally disabled (`asia-central1`) and will refuse connections.
+Filter on `disabled == false` and `health == "healthy"`. The feed is dynamic: disabled and unhealthy entries appear and disappear as nodes are toggled, so never cache the set or infer how many exits exist.
 
 ### `GET /catalog.json` and `GET /packages.json`
 

@@ -74,17 +74,18 @@ scripts/x402socks.sh test              # confirms egress IP actually changed
 
 ## Routing traffic
 
-SOCKS5, TCP 1080, on every exit:
+SOCKS5 on TCP 1080, on every exit. The fleet is not fixed — nodes are added, retired, and toggled at any time, so read `/nodes.json` and filter on `disabled == false and health == "healthy"` instead of trusting a list. Snapshot at the time of writing:
 
-| Exit ID         | Region         |
-| --------------- | -------------- |
-| `us-central1`   | US Texas       |
-| `us-east1`      | US New York    |
-| `us-west1`      | US California  |
-| `eu-central1`   | EU Paris       |
-| `eu-north1`     | EU Riga        |
-| `asia-central2` | APAC Singapore |
-| `asia-west1`    | APAC India     |
+| Exit ID         | Region                |
+| --------------- | --------------------- |
+| `us-central1`   | US Texas              |
+| `us-east1`      | US New York           |
+| `us-west1`      | US California         |
+| `eu-central1`   | EU Paris              |
+| `eu-north1`     | EU Riga               |
+| `asia-central1` | APAC China (Hong Kong) |
+| `asia-central2` | APAC Singapore        |
+| `asia-west1`    | APAC India            |
 
 An HTTP CONNECT variant also runs on **port 3128** for `us-central1`, `eu-central1`, and `asia-central2` only. It is plaintext on the client-to-node hop. Use it for browsers or HTTP clients that cannot send SOCKS5 credentials.
 
@@ -118,7 +119,7 @@ Prefer `socks5h://` over `socks5://` so DNS resolves at the exit rather than loc
 
 ## Gotchas
 
-- `/nodes.json` lists `asia-central1` (APAC China) with `"disabled": true`. It is not usable. Always filter on `disabled`.
+- Node membership changes without notice. `/nodes.json` carries disabled and unhealthy entries alongside live ones (a node that is `disabled: true` or `health: "down"` will refuse connections). Never hardcode the exit list, its size, or which nodes are excluded — always re-read the feed.
 - Entitlements say "1 active session" on single packages. Do not assume unlimited parallelism; use `multi_agent` when several agents must egress at once.
 - Data caps are **fair use**. Sustained bulk transfer may be throttled or cut off.
 - **Failed connections are non-refundable by default.** Validate the token and the exit before blaming the target site.

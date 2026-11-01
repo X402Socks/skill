@@ -1,6 +1,6 @@
 # x402socks skill
 
-An agent skill for [x402socks.com](https://x402socks.com): anonymous SOCKS5 egress for AI agents, bought per-job in USDC on Base through the [x402](https://x402.org) protocol. No signup, no card — the agent quotes a price, pays, receives a one-time proxy token, and routes traffic through one of seven global exits.
+An agent skill for [x402socks.com](https://x402socks.com): anonymous SOCKS5 egress for AI agents, bought per-job in USDC on Base through the [x402](https://x402.org) protocol. No signup, no card — the agent quotes a price, pays, receives a one-time proxy token, and routes traffic through a pool of global exit nodes.
 
 ## Who it's for
 
