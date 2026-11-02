@@ -2,6 +2,8 @@
 
 An agent skill for [x402socks.com](https://x402socks.com): anonymous SOCKS5 egress for AI agents, bought per-job in USDC on Base through the [x402](https://x402.org) protocol. No signup, no card — the agent quotes a price, pays, receives a one-time proxy token, and routes traffic through a pool of global exit nodes.
 
+**Repository:** [github.com/X402Socks/skill](https://github.com/X402Socks/skill)
+
 ## Who it's for
 
 - **Agents that need a different source IP** — geo-specific egress, rate-limit hygiene, or keeping the operator's IP out of third-party logs.
@@ -16,7 +18,10 @@ Install the skill for your agent:
 
 ```bash
 # skills CLI
-npx skills add x402socks/skill
+npx skills add X402Socks/skill
+
+# or clone it
+git clone https://github.com/X402Socks/skill
 
 # Claude Code
 cp -r skills/x402socks ~/.claude/skills/
