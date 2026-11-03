@@ -1,6 +1,6 @@
 # x402socks skill
 
-An agent skill for [x402socks.com](https://x402socks.com): anonymous SOCKS5 egress for AI agents, bought per-job in USDC on Base through the [x402](https://x402.org) protocol. No signup, no card — the agent quotes a price, pays, receives a one-time proxy token, and routes traffic through a pool of global exit nodes.
+An agent skill for [x402socks.com](https://x402socks.com): anonymous proxy egress for AI agents (TLS HTTP CONNECT by default, SOCKS5 opt-in), bought per-job in USDC on Base through the [x402](https://x402.org) protocol. No signup, no card — the agent quotes a price, pays, receives a one-time proxy token, and routes traffic through a pool of global exit nodes.
 
 **Repository:** [github.com/X402Socks/skill](https://github.com/X402Socks/skill)
 **Directory:** [skills.sh/X402Socks/skill](https://skills.sh/X402Socks/skill)
@@ -39,7 +39,7 @@ The agent will check the catalog, tell you the price and what it buys, wait for 
 
 ### What it will and won't do
 
-- It **quotes before spending** and defaults to the cheapest package ($1 / 6 hours / 1 GB). You approve an **amount**, and the client checks the live 402 challenge against it before signing.
+- It **quotes before spending** and defaults to the cheapest package ($1 / 6 hours / 1 GB). You approve the **full payment terms** — scheme, network, asset, recipient, asset domain, and maximum amount — and the client checks every live 402 `accepts[]` option against them before signing.
 - It **stores the token** in a `0600` file and keeps it out of process arguments, logs, and transcripts.
 - It **recovers a lost token** from a settled payment instead of buying again, and **rotates** a token on any hint of exposure.
 - It **stops and asks** if a target's terms forbid automated access — a proxy changes your source IP, not the agreement.
