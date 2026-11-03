@@ -29,7 +29,7 @@ Work down this list in order. It moves from cheapest check to most expensive, so
 | `400 stale_recovery`                           | `issued_at` older than 10 minutes                                    | regenerate the message with a fresh timestamp                |
 | Target sees the wrong country                  | connected to the wrong exit                                          | pick the exit whose `label` matches the region you need      |
 | Target logs your local DNS resolver            | used `socks5://` instead of `socks5h://`                             | switch scheme so DNS resolves at the exit                    |
-| Works in curl, fails in browser                | browser cannot do SOCKS5 auth                                        | use TLS CONNECT on 3129 where available; 3128 is plaintext     |
+| Works in curl, fails in Playwright/Chromium    | Chromium cannot authenticate to SOCKS5; Playwright proxy auth is HTTP-only | use `server: "https://<exit>:3129"` with username/password; 3128 is plaintext |
 | Throughput collapses mid-job                   | fair-use data cap reached                                            | check usage via `status`; buy a larger plan                  |
 | Second agent fails while first works           | single packages allow 1 active session                               | consolidate, or move to `multi_agent`                        |
 

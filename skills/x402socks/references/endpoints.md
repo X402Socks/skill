@@ -210,18 +210,30 @@ undici's `ProxyAgent` speaks HTTP CONNECT, not SOCKS5. For SOCKS5 in Node, use `
 
 ### Playwright
 
+Chromium cannot authenticate to a SOCKS5 proxy, and Playwright's
+`proxy.username` / `proxy.password` only apply to HTTP(S) proxies. A
+`socks5://` entry with credentials fails before it connects. Use the TLS HTTP
+CONNECT listener instead:
+
 ```js
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+
+const t = readFileSync(`${homedir()}/.config/x402socks/token`, "utf8").trim();
+
 const browser = await chromium.launch({
   proxy: {
-    server: "socks5://us-central1.x402socks.com:1080",
-    username: process.env.X402SOCKS_TOKEN,
-    password: process.env.X402SOCKS_TOKEN,
+    server: "https://eu-north1.x402socks.com:3129", // TLS CONNECT, not SOCKS5
+    username: t,
+    password: t,
   },
 });
 ```
 
-Playwright's SOCKS5 authentication is not encrypted either; the token still
-crosses the client-to-exit hop in the clear.
+If the exit only offers SOCKS5, drive it from a script that supports SOCKS5
+authentication (curl, `requests[socks]`, or `socks-proxy-agent`) rather than
+pretending the browser can supply the credentials. The token still crosses the
+client-to-exit hop in the clear on SOCKS5 and on the plaintext 3128 listener.
 
 ### Chrome
 

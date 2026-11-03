@@ -84,19 +84,29 @@ const guardedFetch: typeof fetch = async (input, init) => {
   const header = res.headers.get("PAYMENT-REQUIRED");
   if (!header) throw new Error("402 without PAYMENT-REQUIRED");
 
-  const challenge = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
-  const req = challenge.accepts?.[0];
-  if (!req) throw new Error("402 without a payment requirement");
+  // The header is base64url without padding; normalise before decoding.
+  const json = Buffer.from(
+    header.replace(/-/g, "+").replace(/_/g, "/"),
+    "base64",
+  ).toString("utf8");
+  const challenge = JSON.parse(json);
 
-  if (req.network !== EXPECTED_NETWORK) {
-    throw new Error(`refusing to pay on ${req.network}`);
+  const options: Array<{ network: string; amount: string }> =
+    challenge.accepts ?? [];
+  const payable = options.filter((o) => o.network === EXPECTED_NETWORK);
+  if (payable.length === 0) {
+    throw new Error(`402 offers no payment on ${EXPECTED_NETWORK}`);
   }
 
-  const amount = BigInt(req.amount);
-  if (amount > APPROVED_MAX_ATOMIC) {
-    throw new Error(
-      `quote ${amount} exceeds approved ${APPROVED_MAX_ATOMIC} atomic units`,
-    );
+  // Check every acceptable option, not just the first: the wrapper may pick
+  // any of them, and an over-budget alternative must abort the purchase.
+  for (const option of payable) {
+    const amount = BigInt(option.amount);
+    if (amount > APPROVED_MAX_ATOMIC) {
+      throw new Error(
+        `quote ${amount} exceeds approved ${APPROVED_MAX_ATOMIC} atomic units`,
+      );
+    }
   }
   return res;
 };

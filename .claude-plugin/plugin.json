@@ -1,7 +1,7 @@
 {
   "name": "x402socks",
   "description": "Buy and use anonymous SOCKS5/HTTP proxy egress for agents, paid per-job in USDC over x402.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": {
     "name": "x402socks"
   },
