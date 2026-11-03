@@ -39,7 +39,8 @@ The agent will check the catalog, tell you the price and what it buys, wait for 
 
 ### What it will and won't do
 
-- It **quotes before spending** and defaults to the cheapest package ($1 / 6 hours / 1 GB). You approve the amount.
+- It **quotes before spending** and defaults to the cheapest package ($1 / 6 hours / 1 GB). You approve an **amount**, and the client checks the live 402 challenge against it before signing.
+- It **stores the token** in a `0600` file and keeps it out of process arguments, logs, and transcripts.
 - It **recovers a lost token** from a settled payment instead of buying again, and **rotates** a token on any hint of exposure.
 - It **stops and asks** if a target's terms forbid automated access — a proxy changes your source IP, not the agreement.
 
@@ -50,6 +51,7 @@ cd skills/x402socks/scripts
 ./x402socks.sh health             # is the service up
 ./x402socks.sh nodes --available  # which exits are usable
 ./x402socks.sh catalog --summary  # current prices
+./x402socks.sh quote time_6h      # live 402 amount (free)
 ```
 
 Those hit only public endpoints. Anything that costs money needs a wallet signature, so it can't run by accident.
@@ -59,8 +61,10 @@ Those hit only public endpoints. Anything that costs money needs a wallet signat
 ```
 skills/x402socks/
 ├── SKILL.md            entry point: pricing, buy flow, credential rules
+├── README.md           install, requirements, safety defaults
+├── assets/             purchase-approval template
 ├── references/         payments, endpoints, troubleshooting (loaded on demand)
-└── scripts/            helper CLI for status, rotation, recovery, egress test
+└── scripts/            helper CLI for quote, status, rotation, recovery, egress test
 ```
 
 ## License
