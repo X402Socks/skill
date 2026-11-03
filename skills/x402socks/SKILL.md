@@ -2,7 +2,6 @@
 name: x402socks
 description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or an unblocked fetch - for example "get a proxy", "route this through a proxy", "rotate my IP", "scrape without getting blocked", "anonymous proxy for an agent", "pay for a proxy with USDC", "x402 proxy", or "x402socks". It buys pay-per-use anonymous SOCKS5 egress from x402socks.com, paid in USDC on Base with the x402 protocol.
 license: MIT
-version: 1.1.1
 metadata:
   author: x402socks
   version: 1.1.1
