@@ -101,10 +101,7 @@ Every exit offers SOCKS5 on **TCP 1080**; `eu-north1`, `asia-central2`, and `asi
 
 `https://<exit>.x402socks.com:3129` is the preferred form on the three TLS exits. `curl` verifies the exit's certificate, so a TLS failure means the exit is not usable — do not fall back to plaintext to work around it.
 
-The legacy transports are **opt-in only**:
-
-- `http://<exit>.x402socks.com:3128` — HTTP CONNECT without TLS, on every exit.
-- `socks5h://<exit>.x402socks.com:1080` — SOCKS5 with RFC 1929 user/password, on every exit.
+The legacy transports (plaintext HTTP CONNECT on 3128 and SOCKS5 on 1080) are **opt-in only** and are listed in the transport table in `references/endpoints.md`.
 
 Both send the reusable token in cleartext on the client-to-exit hop. A passive observer on the same network can capture it and use your paid access. The helper refuses them unless `X402SOCKS_ALLOW_PLAINTEXT=1` is set. On an exit without a TLS listener, this is unavoidable; keep the token short-lived and avoid untrusted networks.
 
