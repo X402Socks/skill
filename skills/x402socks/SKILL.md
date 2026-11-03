@@ -4,7 +4,7 @@ description: Use this skill when an agent needs a different source IP, rotating 
 license: MIT
 metadata:
   author: x402socks
-  version: 1.2.0
+  version: 1.2.1
   homepage: https://x402socks.com
 ---
 
@@ -82,7 +82,6 @@ scripts/x402socks.sh quote time_6h          # exits non-zero above $X402SOCKS_MA
 scripts/x402socks.sh save-token             # stdin -> ~/.config/x402socks/token (0600)
 scripts/x402socks.sh status                 # reads the token file, never argv
 scripts/x402socks.sh test eu-north1         # TLS CONNECT 3129, confirms egress IP
-scripts/x402socks.sh test --socks5 eu-north1  # SOCKS5, requires X402SOCKS_ALLOW_PLAINTEXT=1
 ```
 
 ## Routing traffic
@@ -112,13 +111,11 @@ Both send the reusable token in cleartext on the client-to-exit hop. A passive o
 ```bash
 # TLS CONNECT (default, recommended)
 # https://eu-north1.x402socks.com:3129   token as username AND password
-
-# Plaintext transports, only with X402SOCKS_ALLOW_PLAINTEXT=1
-# http://us-central1.x402socks.com:3128
-# socks5h://us-central1.x402socks.com:1080
+#
+# Legacy plaintext and SOCKS5 forms are opt-in only; see references/endpoints.md.
 ```
 
-Client snippets for curl, Python, Node, Playwright, and Chrome are in `references/endpoints.md`. In SOCKS5 form prefer `socks5h://` over `socks5://` so DNS resolves at the exit rather than locally — otherwise the local resolver still leaks your target hostname.
+Client snippets for curl, Python, Node, Playwright, and Chrome are in `references/endpoints.md`. If a legacy client requires SOCKS5, use the remote-DNS (`h`) scheme variant so the exit resolves the name; the plain variant leaks the target hostname to the local resolver.
 
 ## Credential rules (hard)
 

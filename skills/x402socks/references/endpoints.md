@@ -116,15 +116,14 @@ Same body. Returns **204 No Content** on success, `401` otherwise. Cheap livenes
 ### `POST https://api.x402socks.com/api/v1/token/rotate`
 
 ```bash
-# Token goes through stdin into curl's --config, never into argv.
-printf 'header = "Authorization: Bearer %s"\n' \
-  "$(cat ~/.config/x402socks/token)" | \
-curl -sS --config - -X POST https://api.x402socks.com/api/v1/token/rotate
+# Saves the replacement token atomically to the 0600 token file and prints a
+# redacted response. The old token stops working immediately.
+scripts/x402socks.sh rotate
 ```
 
 Success: `200 {"account":{...},"token":"NEW_TOKEN"}`. The old token stops working immediately, for the proxy and every other route. Unknown, inactive, or expired tokens get `401 "a valid token is required"` and nothing changes.
 
-The response contains the replacement token. Write it to a `0600` file rather than printing it; `scripts/x402socks.sh rotate` does that and emits a redacted copy of the response.
+The replacement token is the only copy. If you call the endpoint directly, capture the response yourself and write it to the `0600` file before any output reaches a terminal, transcript, or log — do not print the raw JSON.
 
 ## Purchasing
 
@@ -244,21 +243,12 @@ Chrome shows its own credential dialog after the first `407`. Enter the token as
 
 ### Legacy plaintext transports (opt-in)
 
-Only if the client cannot use TLS CONNECT, and only on a network you trust:
-
-```bash
-# HTTP CONNECT without TLS
-X402SOCKS_ALLOW_PLAINTEXT=1 scripts/x402socks.sh test --plaintext us-central1
-
-# SOCKS5 with RFC 1929 user/password
-X402SOCKS_ALLOW_PLAINTEXT=1 scripts/x402socks.sh test --socks5 us-central1
-```
-
-The helper prints a warning when either is selected. For hand-written clients,
-the equivalent URLs are `http://<exit>.x402socks.com:3128` and
-`socks5h://<exit>.x402socks.com:1080` with the token as both username and
-password. Both put the reusable token on the wire in cleartext; a successful
-TLS request does not protect that hop.
+Only if the client cannot use TLS CONNECT, and only on a network you trust.
+The helper exposes both under `test --plaintext` / `test --socks5` with
+`X402SOCKS_ALLOW_PLAINTEXT=1`; see `scripts/x402socks.sh help`. For hand-written
+clients, use the addresses in the transport table above with the token as both
+username and password. Both put the reusable token on the wire in cleartext; a
+successful TLS request does not protect that hop.
 
 ## Rate limits and secrecy
 
