@@ -80,6 +80,10 @@ except json.JSONDecodeError:
     sys.stdout.write(raw)
     sys.stderr.write("\nno token in response; nothing was saved\n")
     sys.exit(1)
+if not isinstance(data, dict):
+    sys.stdout.write(raw)
+    sys.stderr.write("\nunexpected response shape; nothing was saved\n")
+    sys.exit(1)
 token = data.get("token")
 if not token:
     json.dump(data, sys.stdout, indent=2)
@@ -149,10 +153,14 @@ Budget guard:
   X402SOCKS_MAX_USDC    approved maximum in USD; 'quote' fails above it
   X402SOCKS_TIMEOUT     per-request timeout in seconds (default 30)
 
-Plaintext transports (opt-in):
+EOF
+  if [ "${X402SOCKS_ALLOW_PLAINTEXT:-}" = "1" ]; then
+    cat <<'EOF2'
+Plaintext transports (enabled, opt-in):
   X402SOCKS_ALLOW_PLAINTEXT=1   required for SOCKS5 1080 and plaintext CONNECT 3128
                                 both send the reusable token unencrypted
-EOF
+EOF2
+  fi
 }
 
 cmd_health() {
@@ -268,15 +276,14 @@ print("within approved cap ($%.2f; %d option%s)"
 }
 
 cmd_save_token() {
-  local file token
-  file="$(token_file)"
-  mkdir -p "$(dirname "$file")"
-  chmod 700 "$(dirname "$file")" 2>/dev/null || true
+  local token body
   token="$(tr -d '\r\n')"
   [ -n "$token" ] || die "no token on stdin"
-  ( umask 077; printf '%s' "$token" > "$file" )
-  chmod 600 "$file"
-  printf 'saved token to %s (mode 600)\n' "$file"
+  # Reuse the hardened writer used by rotate/recover: owner + permission
+  # checks, symlink rejection, mkstemp(0600) + fsync + atomic os.replace.
+  # The token travels on stdin only; it is never an argument.
+  body="$(printf '%s' "$token" | json_token_body)"
+  printf '%s' "$body" | store_token_response
 }
 
 cmd_status() {

@@ -4,7 +4,7 @@ description: Use this skill when an agent needs a different source IP, rotating 
 license: MIT
 metadata:
   author: x402socks
-  version: 1.2.1
+  version: 1.2.2
   homepage: https://x402socks.com
 ---
 
