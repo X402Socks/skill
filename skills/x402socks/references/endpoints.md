@@ -24,15 +24,7 @@ https://<exit>.x402socks.com:3129
 
 The client verifies the exit certificate, then sends `Proxy-Authorization` inside the TLS tunnel to the exit. The reusable token is not readable on the client-to-exit hop.
 
-The other exits and the legacy transports are **opt-in**:
-
-| Transport              | Address                                   | Availability                          | Token on the wire        |
-| ---------------------- | ----------------------------------------- | ------------------------------------- | ------------------------ |
-| TLS HTTP CONNECT       | `https://<exit>.x402socks.com:3129`       | `eu-north1`, `asia-central2`, `asia-west1` | Encrypted (recommended)  |
-| HTTP CONNECT, plaintext| `http://<exit>.x402socks.com:3128`        | every exit                            | Cleartext                |
-| SOCKS5 (RFC 1929)      | `socks5h://<exit>.x402socks.com:1080`     | every exit                            | Cleartext                |
-
-Both legacy transports send the token unencrypted. A passive observer on the same network can capture it and spend the remaining balance. Use them only when a client cannot do TLS CONNECT and the network is trusted; `scripts/x402socks.sh` requires `X402SOCKS_ALLOW_PLAINTEXT=1` before it will use either.
+The other exits also offer plaintext HTTP CONNECT on **3128** or SOCKS5 on **1080**. Those send the reusable token unencrypted on the client-to-exit hop and are **opt-in only**: the helper requires `X402SOCKS_ALLOW_PLAINTEXT=1` before it will use either. Use them only when a client cannot do TLS CONNECT and the network is trusted; see `references/endpoints.md` for the addresses.
 
 ## Service state
 
@@ -170,25 +162,22 @@ curl --config "$cfg" https://api.ipify.org
 `curl` verifies the exit certificate by default. If that check fails, the exit
 is not usable — do not disable verification or fall back to plaintext.
 
-### Python (requests, TLS CONNECT)
+### Python (urllib3, TLS CONNECT) — token sent via `Proxy-Authorization`, never in a URL
 
 ```python
-import os
-import requests
+import os, base64, urllib3
 
 token = open(os.path.expanduser("~/.config/x402socks/token")).read().strip()
-proxy = f"https://{token}:{token}@eu-north1.x402socks.com:3129"
+auth = base64.b64encode(f"{token}:{token}".encode()).decode()
 
-print(
-    requests.get(
-        "https://api.ipify.org",
-        proxies={"http": proxy, "https": proxy},
-        timeout=30,
-    ).text
+http = urllib3.ProxyManager(
+    "https://eu-north1.x402socks.com:3129",
+    proxy_headers={"Proxy-Authorization": f"Basic {auth}"},
 )
+print(http.request("GET", "https://api.ipify.org").data.decode())
 ```
 
-This needs `requests` 2.26+ and `urllib3` 2.0+, which support an HTTPS proxy.
+This needs `urllib3` 2.0+, which supports an HTTPS proxy. The token is put in a `Proxy-Authorization` header, not embedded in a URL; if the request does not send it on your urllib3 version, fall back to the `requests` snippet above and add "do not log the proxy URL / token" beside it.
 The token stays in process memory; it is not placed in argv.
 
 ### Node (undici, TLS CONNECT)

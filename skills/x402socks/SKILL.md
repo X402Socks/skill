@@ -88,20 +88,18 @@ scripts/x402socks.sh test eu-north1         # TLS CONNECT 3129, confirms egress 
 
 Every exit offers SOCKS5 on **TCP 1080**; `eu-north1`, `asia-central2`, and `asia-west1` also offer **TLS HTTP CONNECT on TCP 3129**, which is the recommended transport. The fleet is not fixed — nodes are added, retired, and toggled at any time, so read `/nodes.json` and filter on `disabled == false and health == "healthy"` instead of trusting a list. Snapshot at the time of writing:
 
-| Exit ID         | Region                | TLS 3129 | Plain 3128 | SOCKS5 1080 |
-| --------------- | --------------------- | -------- | ---------- | ----------- |
-| `us-central1`   | US Texas              | no       | yes        | yes         |
-| `us-east1`      | US New York           | no       | yes        | yes         |
-| `us-west1`      | US California         | no       | yes        | yes         |
-| `eu-central1`   | EU Paris              | no       | yes        | yes         |
-| `eu-north1`     | EU Riga               | **yes**  | yes        | yes         |
-| `asia-central1` | APAC China (Hong Kong) | no      | yes        | yes         |
-| `asia-central2` | APAC Singapore        | **yes**  | yes        | yes         |
-| `asia-west1`    | APAC India            | **yes**  | yes        | yes         |
+| Exit ID         | Region                | TLS 3129 |
+| --------------- | --------------------- | -------- |
+| `us-central1`   | US Texas              | no       |
+| `us-east1`      | US New York           | no       |
+| `us-west1`      | US California         | no       |
+| `eu-central1`   | EU Paris              | no       |
+| `eu-north1`     | EU Riga               | **yes**  |
+| `asia-central1` | APAC China (Hong Kong) | no       |
+| `asia-central2` | APAC Singapore        | **yes**  |
+| `asia-west1`    | APAC India            | **yes**  |
 
-`https://<exit>.x402socks.com:3129` is the preferred form on the three TLS exits. `curl` verifies the exit's certificate, so a TLS failure means the exit is not usable — do not fall back to plaintext to work around it.
-
-The legacy transports (plaintext HTTP CONNECT on 3128 and SOCKS5 on 1080) are **opt-in only** and are listed in the transport table in `references/endpoints.md`.
+The legacy transports (plaintext HTTP CONNECT on **3128** and SOCKS5 on **1080**) are **opt-in only** and listed in `references/endpoints.md`. Both send the reusable token unencrypted on the client-to-exit hop; use them only when a client cannot do TLS CONNECT and the network is trusted.
 
 Both send the reusable token in cleartext on the client-to-exit hop. A passive observer on the same network can capture it and use your paid access. The helper refuses them unless `X402SOCKS_ALLOW_PLAINTEXT=1` is set. On an exit without a TLS listener, this is unavoidable; keep the token short-lived and avoid untrusted networks.
 
