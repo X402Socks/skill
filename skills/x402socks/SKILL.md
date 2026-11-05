@@ -4,7 +4,7 @@ description: Use this skill when an agent needs a different source IP, rotating 
 license: MIT
 metadata:
   author: x402socks
-  version: 1.2.2
+  version: 1.2.3
   homepage: https://x402socks.com
 ---
 
@@ -99,9 +99,7 @@ Every exit offers **SOCKS5 on TCP 1080** as the primary protocol. `eu-north1`, `
 | `asia-central2` | APAC Singapore        | yes         | **yes**  |
 | `asia-west1`    | APAC India            | yes         | **yes**  |
 
-Plaintext HTTP CONNECT on **3128** is supported only for browser compatibility (Chrome/iium) and will be **discontinued shortly**. Both legacy transports send the reusable token unencrypted on the client-to-exit hop; use them only when a client cannot do TLS CONNECT and the network is trusted. The helper requires `X402SOCKS_ALLOW_PLAINTEXT=1` before it will use either.
-
-Both send the reusable token in cleartext on the client-to-exit hop. A passive observer on the same network can capture it and use your paid access. The helper refuses them unless `X402SOCKS_ALLOW_PLAINTEXT=1` is set. On an exit without a TLS listener, this is unavoidable; keep the token short-lived and avoid untrusted networks.
+Plaintext HTTP CONNECT on **3128** is supported only for browser compatibility (Chrome and similar) and will be **discontinued shortly**. Both legacy transports send the reusable token unencrypted on the client-to-exit hop; a passive observer on the same network can capture it and use your paid access. The helper refuses them unless `X402SOCKS_ALLOW_PLAINTEXT=1` is set. On an exit without a TLS listener this is unavoidable; keep the token short-lived and avoid untrusted networks.
 
 ```bash
 # TLS CONNECT (default, recommended)

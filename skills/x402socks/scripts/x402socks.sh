@@ -77,18 +77,18 @@ raw = sys.stdin.read()
 try:
     data = json.loads(raw)
 except json.JSONDecodeError:
-    sys.stdout.write(raw)
-    sys.stderr.write("\nno token in response; nothing was saved\n")
-    sys.exit(1)
+    # Never echo the raw response: a truncated body can still contain the
+    # replacement token. Print a fixed error instead.
+    sys.exit("response was not valid JSON; nothing was saved")
 if not isinstance(data, dict):
-    sys.stdout.write(raw)
-    sys.stderr.write("\nunexpected response shape; nothing was saved\n")
-    sys.exit(1)
+    sys.exit("unexpected response shape; nothing was saved")
 token = data.get("token")
 if not token:
-    json.dump(data, sys.stdout, indent=2)
-    sys.stdout.write("\n")
-    sys.exit("response did not include a token; nothing was saved")
+    # Print field names only, never their values.
+    sys.exit(
+        "response did not include a token; nothing was saved (fields: %s)"
+        % (", ".join(sorted(data.keys())) or "none")
+    )
 
 directory = os.path.dirname(path) or "."
 if os.path.islink(directory) or not os.path.isdir(directory):
