@@ -14,11 +14,55 @@ API="${X402SOCKS_API:-https://api.x402socks.com}"
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 
+# Reject line breaks and other control characters before a value reaches a
+# curl config. A newline would end the quoted value and start a new directive,
+# which is how an environment token or URL could inject curl options.
+reject_unsafe_text() {
+  local name="$1" value="$2"
+  case "$value" in
+    *$'\r'*|*$'\n'*) die "$name must not contain a line break" ;;
+  esac
+  if printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    die "$name must not contain control characters"
+  fi
+}
+
+# Endpoint overrides are parsed once, before any credential is read. Only a
+# plain http(s) URL with a host and no embedded credentials is accepted; this
+# also blocks quotes, backslashes, whitespace, and fragments that would make
+# the quoted curl config ambiguous.
+validate_endpoint_url() {
+  local name="$1" url="$2"
+  reject_unsafe_text "$name" "$url"
+  python3 - "$name" "$url" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+name, url = sys.argv[1], sys.argv[2]
+if any(c.isspace() or c in '"\\' for c in url):
+    sys.exit("%s must not contain whitespace, quotes, or backslashes" % name)
+try:
+    parts = urlsplit(url)
+    host = parts.hostname
+except ValueError as exc:
+    sys.exit("%s is not a valid URL: %s" % (name, exc))
+if parts.scheme not in ("https", "http"):
+    sys.exit("%s must be an http(s) URL" % name)
+if not host:
+    sys.exit("%s must include a host" % name)
+if parts.username is not None or parts.password is not None:
+    sys.exit("%s must not embed credentials" % name)
+if parts.fragment:
+    sys.exit("%s must not include a fragment" % name)
+PY
+}
+
 # Credential-bearing requests must target https://. A plaintext URL (for
 # example a local test harness) is refused before the token or signature is
 # read, unless the operator explicitly opts in for that trusted environment.
 require_https() {
   local name="$1" url="$2"
+  validate_endpoint_url "$name" "$url"
   case "$url" in
     https://*) return 0 ;;
     http://*)
@@ -82,8 +126,32 @@ print(staging)
 ' "$file")"
 }
 
-# Escape a value for a double-quoted curl config entry.
-cfg_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+# Escape a value for a double-quoted curl config entry. Line breaks and other
+# control characters are refused instead of escaped: curl treats a newline as
+# the end of a directive, so escaping it would still allow config injection.
+cfg_escape() {
+  case "$1" in
+    *$'\r'*|*$'\n'*) die "refusing a curl config value that contains a line break" ;;
+  esac
+  if printf '%s' "$1" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    die "refusing a curl config value that contains control characters"
+  fi
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Tokens are opaque base64url (proxy-api) or hex (payment service) strings.
+# Anything outside that alphabet is a mistake or an injection attempt, and a
+# colon would corrupt the proxy-user credential pair.
+validate_token() {
+  local token="$1"
+  case "$token" in
+    "") die "empty token" ;;
+    *[!A-Za-z0-9_-]*) die "token contains unsupported characters (expected base64url or hex)" ;;
+  esac
+  if [ "${#token}" -lt 8 ] || [ "${#token}" -gt 512 ]; then
+    die "token length is out of range"
+  fi
+}
 
 # Run one curl request whose options arrive on stdin. This keeps the token out
 # of the process list; only the URL is passed as an argument. The transfer and
@@ -93,6 +161,9 @@ req_secret() {
   local url="$1"
   shift
   local cfg proto
+  # Defense in depth: reject injection here even if a future caller forgets
+  # require_https, because this is where the URL enters the curl config.
+  reject_unsafe_text "credential URL" "$url"
   cfg="$(cat)"
   case "$url" in
     https://*) proto=(--proto '=https' --proto-redir '=https') ;;
@@ -110,15 +181,17 @@ json_token_body() {
 }
 
 resolve_token() {
-  local file
+  local file token
   file="$(token_file)"
   if [ -s "$file" ]; then
-    tr -d '\r\n' < "$file"
+    token="$(tr -d '\r\n' < "$file")"
   elif [ "${X402SOCKS_TOKEN:-}" != "" ]; then
-    printf '%s' "$X402SOCKS_TOKEN"
+    token="$X402SOCKS_TOKEN"
   else
     die "no token: run 'save-token' after purchase, or export X402SOCKS_TOKEN"
   fi
+  validate_token "$token"
+  printf '%s' "$token"
 }
 
 # Persist a token returned by rotate/recover and print a redacted response.
@@ -165,6 +238,12 @@ if not token:
         "response did not include a token; nothing was saved (fields: %s)"
         % (", ".join(sorted(data.keys())) or "none")
     )
+if not isinstance(token, str) or not (8 <= len(token) <= 512):
+    drop_staging()
+    sys.exit("response token is not a usable string; nothing was saved")
+if any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for c in token):
+    drop_staging()
+    sys.exit("response token contains unsupported characters; nothing was saved")
 
 directory = os.path.dirname(path) or "."
 if os.path.islink(directory) or not os.path.isdir(directory):
@@ -388,6 +467,7 @@ cmd_save_token() {
   local token body
   token="$(tr -d '\r\n')"
   [ -n "$token" ] || die "no token on stdin"
+  validate_token "$token"
   # Reuse the hardened writer used by rotate/recover: owner + permission
   # checks, symlink rejection, mkstemp(0600) + fsync + atomic os.replace.
   # The token travels on stdin only; it is never an argument.

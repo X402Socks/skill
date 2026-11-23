@@ -97,7 +97,7 @@ done
 STDIN_DATA=""; ALLOW_INSECURE=1; FAKE_RESPONSE='{}'
 run_named status "file:///tmp/evil"
 if [ "$LAST_RC" -ne 0 ] && [ "$LAST_CALLS" -eq 0 ] &&
-   contains "$LAST_OUT" "must be an https:// URL"; then
+   contains "$LAST_OUT" "must be an http(s) URL"; then
   pass "non-HTTP(S) override refused even with opt-in"
 else
   bad "non-HTTP(S) refusal (rc=$LAST_RC calls=$LAST_CALLS) output=$LAST_OUT"

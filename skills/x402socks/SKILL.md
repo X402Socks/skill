@@ -4,7 +4,7 @@ description: Use this skill when an agent needs a different source IP, rotating 
 license: MIT
 metadata:
   author: x402socks
-  version: 1.3.0
+  version: 1.3.1
   homepage: https://x402socks.com
 ---
 
@@ -101,10 +101,10 @@ scripts/x402socks.sh test eu-north1
 # curl: put the proxy credentials in a 0600 config file, not argv
 umask 077
 cfg="$(mktemp)"; trap 'rm -f "$cfg"' EXIT
+tok="$(tr -d '\r\n' < ~/.config/x402socks/token)"
 {
   printf 'proxy = "https://eu-north1.x402socks.com:3129"\n'
-  printf 'proxy-user = "%s:%s"\n' \
-    "$(cat ~/.config/x402socks/token)" "$(cat ~/.config/x402socks/token)"
+  printf 'proxy-user = "%s:%s"\n' "$tok" "$tok"
 } > "$cfg"
 curl --config "$cfg" https://api.ipify.org
 ```

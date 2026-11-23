@@ -89,8 +89,11 @@ cp -r skills/x402socks ~/.agents/skills/       # OpenCode and other clients
   appears in the process list. Rotation and recovery save the replacement token
   instead of printing it. Endpoint overrides must be `https://`; a plaintext
   override is refused before the token is read, and credential transfers are
-  restricted to HTTPS. `X402SOCKS_ALLOW_INSECURE_API=1` is for a trusted local
-  test only.
+  restricted to HTTPS. Tokens must be base64url/hex, and the helper rejects
+  CR/LF and control characters in tokens and endpoint overrides and parses each
+  URL before reading credentials, so an environment value cannot inject curl
+  configuration. `X402SOCKS_ALLOW_INSECURE_API=1` is for a trusted local test
+  only.
 - **Transport:** TLS HTTP CONNECT on port 3129 is the default where the exit
   offers it (`eu-north1`, `asia-central2`, `asia-west1`). SOCKS5 and plaintext
   HTTP CONNECT do not encrypt proxy authentication and require
