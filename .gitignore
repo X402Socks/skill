@@ -7,3 +7,6 @@
 tokens/
 *.pem
 *.key
+
+# local wallet scratch notes
+WALLET.md
