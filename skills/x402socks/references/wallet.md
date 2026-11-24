@@ -121,26 +121,30 @@ amount - write it to a `0600` file, and sign with the keystore:
 }
 ```
 
+```bash
 umask 077
 # Write the JSON above to typed-data.json (mode 600), then:
 cast wallet sign --data --from-file typed-data.json \
   --keystore "$KEYSTORE" --password-file "$KEYPASS"
 ```
 
-Take `name`, `version`, `chainId`, `verifyingContract`, `to`, and `value` from
-the live 402 `accepts[]`. `nonce` must be a fresh random 32-byte value;
-`validBefore` must be in the future and within `maxTimeoutSeconds`. Then put the
-signature and authorization into the x402 v2 payload and retry with
-`PAYMENT-SIGNATURE` (see `payments.md`). If your x402 client already does this,
-prefer the client - it is less error-prone.
+Before signing, confirm the live 402 `accepts[]` has exactly one option and that
+its `name`, `version`, `chainId`, `verifyingContract`, `to`, and `value` equal
+the approved terms; abort on any difference. Then use those values for the typed
+data. `nonce` must be a fresh random 32-byte value; `validBefore` must be in the
+future and within `maxTimeoutSeconds`. Then put the signature and authorization
+into the x402 v2 payload and retry with `PAYMENT-SIGNATURE` (see `payments.md`).
+If your x402 client already does this, prefer the client - it is less error-prone.
 
 ## Recovery signature
 
 Recovery uses EIP-191 `personal_sign`, not EIP-712.
-`scripts/x402socks.sh recover-message <tx_hash>` prints the exact bytes; sign
-them with
+`scripts/x402socks.sh recover-message <tx_hash>` prints the exact bytes and the
+`issued_at` to reuse; sign them with
 `cast wallet sign "<message>" --keystore "$KEYSTORE" --password-file "$KEYPASS"`
-and feed the signature to the helper on stdin. Never put the signature in argv.
+and feed the signature to `recover <tx_hash> <issued_at>` on stdin. Never put the
+signature in argv; the helper sends the timestamp you pass, so it must be the one
+you signed.
 
 ## If there is no wallet access
 

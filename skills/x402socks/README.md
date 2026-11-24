@@ -2,7 +2,8 @@
 
 An [Agent Skill](https://agentskills.io) for buying short-lived anonymous proxy
 egress with USDC on Base through [x402](https://x402.org). TLS HTTP CONNECT is
-the default transport; SOCKS5 and plaintext CONNECT are opt-in.
+the only transport the skill uses; SOCKS5 and plaintext CONNECT are legacy
+browser options.
 
 The skill teaches an agent to quote a package, get approval for an exact amount,
 complete the x402 v2 payment, store the one-time token safely, route traffic
@@ -87,17 +88,19 @@ cp -r skills/x402socks ~/.agents/skills/       # OpenCode and other clients
 - **Credentials:** the helper reads the token from a `0600` file
   (`~/.config/x402socks/token`) and passes it to curl on stdin, so it never
   appears in the process list. Rotation and recovery save the replacement token
-  instead of printing it. Endpoint overrides must be `https://`; a plaintext
-  override is refused before the token is read, and credential transfers are
-  restricted to HTTPS. Tokens must be base64url/hex, and the helper rejects
-  CR/LF and control characters in tokens and endpoint overrides and parses each
-  URL before reading credentials, so an environment value cannot inject curl
-  configuration. `X402SOCKS_ALLOW_INSECURE_API=1` is for a trusted local test
-  only.
-- **Transport:** TLS HTTP CONNECT on port 3129 is the default where the exit
-  offers it (`eu-north1`, `asia-central2`, `asia-west1`). SOCKS5 and plaintext
-  HTTP CONNECT do not encrypt proxy authentication and require
-  `X402SOCKS_ALLOW_PLAINTEXT=1`.
+  instead of printing it. The helper only sends credentials to `https://`
+  x402socks hosts: a plaintext or foreign-host override is refused before the
+  token is read, and credential transfers are restricted to HTTPS. Token reads
+  and writes both require a private regular file owned by the current user (no
+  symlinks, no group/world access). Tokens must be base64url/hex, and the helper
+  rejects CR/LF and control characters in tokens and endpoint overrides and
+  parses each URL before reading credentials, so an environment value cannot
+  inject curl configuration. `X402SOCKS_ALLOW_INSECURE_API=1` is for a trusted
+  local test only.
+- **Transport:** TLS HTTP CONNECT on port 3129 is the only transport the helper
+  uses (`eu-north1`, `asia-central2`, `asia-west1`). SOCKS5 and plaintext HTTP
+  CONNECT exist for legacy browser clients, send the token unencrypted, and are
+  not part of the agent workflow.
 
 ## Links
 

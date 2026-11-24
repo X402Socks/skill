@@ -1,10 +1,10 @@
 ---
 name: x402socks
-description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or an unblocked fetch - for example "get a proxy", "route this through a proxy", "rotate my IP", "scrape without getting blocked", "anonymous proxy for an agent", "pay for a proxy with USDC", "x402 proxy", or "x402socks". It buys pay-per-use anonymous proxy egress from x402socks.com (TLS HTTP CONNECT by default, SOCKS5 opt-in), paid in USDC on Base with the x402 protocol.
+description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or a privacy-preserving fetch - for example "get a proxy", "route this through a proxy", "rotate my IP", "fetch from a specific region", "anonymous proxy for an agent", "pay for a proxy with USDC", "x402 proxy", or "x402socks". It buys pay-per-use anonymous proxy egress from x402socks.com over TLS HTTP CONNECT, paid in USDC on Base with the x402 protocol. Use it only for targets you are authorized to access.
 license: MIT
 metadata:
   author: x402socks
-  version: 1.3.1
+  version: 1.3.2
   homepage: https://x402socks.com
 ---
 
@@ -14,10 +14,11 @@ Buy anonymous proxy egress for an agent, paid per job in USDC on Base through
 **x402** (HTTP 402). No signup, no email, no card. The payment returns a one-time
 proxy token; use it as **both** the proxy username and password.
 
-TLS HTTP CONNECT on port **3129** is the default where available (`eu-north1`,
-`asia-central2`, `asia-west1`): the exit presents a valid certificate and curl
-verifies it. SOCKS5 (1080) and plaintext HTTP CONNECT (3128) are opt-in; both
-expose the reusable token on the client-to-exit hop.
+TLS HTTP CONNECT on port **3129** is the only transport this skill uses: the
+exit presents a valid certificate and curl verifies it. SOCKS5 (1080) and
+plaintext HTTP CONNECT (3128) exist for legacy browser clients; they send the
+reusable token without encryption, so this skill does not use them and the
+helper does not expose them.
 
 ## Before you start: wallet access (required)
 
@@ -55,7 +56,7 @@ scripts/x402socks.sh nodes --available              # usable exits only
 X402SOCKS_MAX_USDC=1.00 scripts/x402socks.sh quote time_6h
 # pay with the x402 client (see references/payments.md), then:
 scripts/x402socks.sh save-token                     # paste token, Ctrl-D; mode 600
-scripts/x402socks.sh test eu-north1                 # TLS 3129, prints egress IP
+scripts/x402socks.sh test eu-north1                 # TLS 3129, fails if IP unchanged
 ```
 
 ## Spending rule
@@ -66,14 +67,15 @@ exact amount.**
 1. Read the live price from `/catalog.json` (or `quote <package_id>`).
 2. Tell the user the package, price, and entitlements.
 3. Wait for a clear yes.
-4. Before signing, compare the live 402 `accepts[]` to the approved terms:
-   `scheme`, `network`, `asset`, `payTo`, `extra.name`, `extra.version`, and
-   `amount`. Abort on any mismatch or ambiguity.
+4. Before signing, require **exactly one** live 402 `accepts[]` option and
+   compare every field to the approved terms: `scheme`, `network`, `asset`,
+   `payTo`, `extra.name`, `extra.version`, and `amount`. Abort if the list has
+   more than one option, if any option differs, or if anything is ambiguous.
 
-An approval is an amount, not a package name. `scripts/x402socks.sh quote
-<package_id>` prints the live terms and exits non-zero above
-`X402SOCKS_MAX_USDC`. Start with `time_6h` ($1.00, 6 hours, 1 GB) unless the job
-clearly needs more; re-read `/catalog.json` for current packages.
+An approval is the exact amount and terms, not a package name.
+`scripts/x402socks.sh quote <package_id>` prints the live terms and exits
+non-zero above `X402SOCKS_MAX_USDC`. Start with `time_6h` ($1.00, 6 hours, 1 GB)
+unless the job clearly needs more; re-read `/catalog.json` for current packages.
 
 ## Steps
 
@@ -87,15 +89,15 @@ clearly needs more; re-read `/catalog.json` for current packages.
 5. **Save the token.** It is returned once as
    `{"account":{...},"token":"..."}`. Write it to a `0600` file; never print it.
 6. **Route and prove.** Use TLS CONNECT on 3129 with the token as both username
-   and password. `scripts/x402socks.sh test <exit>` prints the egress IP; compare
-   it with your direct IP.
+   and password. `scripts/x402socks.sh test <exit>` fetches a direct baseline,
+   forces the proxy, and fails if the egress IP did not change.
 7. **If it fails.** Run `status` (or `validate`) before debugging the target. A
    dead token and a dead exit look identical.
 
 ## Using the token
 
 ```bash
-# Helper: TLS CONNECT by default, token read from the 0600 file, never argv
+# Helper: TLS CONNECT only, token read from the 0600 file, never argv
 scripts/x402socks.sh test eu-north1
 
 # curl: put the proxy credentials in a 0600 config file, not argv
@@ -109,11 +111,10 @@ tok="$(tr -d '\r\n' < ~/.config/x402socks/token)"
 curl --config "$cfg" https://api.ipify.org
 ```
 
-For SOCKS5 use `socks5h://<exit>.x402socks.com:1080` so the exit resolves DNS.
-SOCKS5 and plaintext CONNECT (3128) require `X402SOCKS_ALLOW_PLAINTEXT=1` in the
-helper and send the token unencrypted; use them only when a client cannot do TLS
-CONNECT and the network is trusted. Python, Node, Playwright, and Chrome examples
-are in `references/endpoints.md`.
+The helper uses TLS CONNECT only. SOCKS5 (1080) and plaintext CONNECT (3128)
+exist for legacy browser clients, but they send the reusable token without
+encryption; do not use them for an agent purchase. Python, Node, Playwright, and
+Chrome examples are in `references/endpoints.md`.
 
 ## Credential rules (hard)
 
@@ -124,13 +125,13 @@ are in `references/endpoints.md`.
   config file; the helper does this for curl.
 - Never echo a token into a chat, transcript, or commit. If one appears in
   output, treat it as burned and rotate it.
-- Prefer TLS CONNECT on 3129. Rotate on suspicion:
+- Use TLS CONNECT on 3129 only. Rotate on suspicion:
   `scripts/x402socks.sh rotate` invalidates the old token immediately and saves
   the replacement without printing it.
-- Credential-bearing requests only go to `https://`. The helper refuses a
-  plaintext `X402SOCKS_WEB`, `X402SOCKS_API`, or `X402SOCKS_PAY` override before
-  reading the token, and pins curl to HTTPS. `X402SOCKS_ALLOW_INSECURE_API=1` is
-  for a trusted local test only.
+- Credential-bearing requests only go to `https://` x402socks hosts. The helper
+  refuses any other host before reading the token, even when the certificate is
+  valid, and pins curl to HTTPS. `X402SOCKS_ALLOW_INSECURE_API=1` is for a
+  trusted local test only.
 
 ## Gotchas
 
@@ -139,9 +140,9 @@ are in `references/endpoints.md`.
   agents.
 - Data caps are fair use; sustained bulk transfer may be throttled.
 - Failed connections are non-refundable by default; validate first.
-- 402 amounts are atomic USDC (6 decimals): `"1000000"` = $1.00. The runtime
-  challenge is authoritative for network, asset, recipient, and amount - never
-  hardcode them.
+- 402 amounts are atomic USDC (6 decimals): `"1000000"` = $1.00. The approved
+  terms are authoritative; the runtime challenge must match them exactly or the
+  purchase aborts - never hardcode terms from a previous quote.
 - Support: https://t.me/x402socks.
 
 ## References

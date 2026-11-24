@@ -18,23 +18,27 @@ additive-compatible; treat unknown fields as ignorable. For wallet setup and
 
 ## Transport
 
-**TLS HTTP CONNECT on 3129** (`https://<exit>.x402socks.com:3129`) is the
-preferred transport and is available on `eu-north1`, `asia-central2`, and
-`asia-west1`. **SOCKS5 on 1080** is the fallback available on every exit.
-Plaintext HTTP CONNECT on **3128** is supported only for browser compatibility
-and will be **discontinued shortly**. Both SOCKS5 and plaintext CONNECT send the
-reusable token unencrypted on the client-to-exit hop and are **opt-in only**: the
-helper requires `X402SOCKS_ALLOW_PLAINTEXT=1` before it will use either. Use them
-only when a client cannot do TLS CONNECT and the network is trusted.
+**TLS HTTP CONNECT on 3129** (`https://<exit>.x402socks.com:3129`) is the only
+transport this skill uses: the exit presents a valid certificate and curl
+verifies it, so the token is encrypted on the client-to-exit hop. It is available
+on `eu-north1`, `asia-central2`, and `asia-west1`.
 
-## Legacy transport addresses (for browser compatibility only)
+SOCKS5 (1080) and plaintext HTTP CONNECT (3128) exist for legacy browser clients
+only. Both send the reusable token unencrypted on the client-to-exit hop, so this
+skill does not use them and the helper does not expose them. Do not add a
+plaintext or SOCKS5 step to an agent workflow; if a client cannot do TLS CONNECT,
+stop and ask the operator rather than downgrading the transport.
+
+## Legacy transport addresses (browser compatibility only)
 
 | Transport | Address | Notes |
 | --------- | ------- | ----- |
-| Plaintext HTTP CONNECT | `http://<exit>.x402socks.com:3128` | Every exit |
-| SOCKS5 | `socks5h://<exit>.x402socks.com:1080` | Every exit |
+| Plaintext HTTP CONNECT | `http://<exit>.x402socks.com:3128` | Browser clients only; token in cleartext |
+| SOCKS5 | `socks5h://<exit>.x402socks.com:1080` | Browser clients only; token in cleartext |
 
-When using these legacy transports, the token is sent in cleartext on the client-to-proxy hop. Do not use unless necessary for browser compatibility and the network is trusted.
+These addresses exist so a browser that cannot do TLS CONNECT still has an
+option. They are not part of this skill's workflow, and a successful TLS request
+through them does not protect the token on the proxy hop.
 
 ## Service state
 
@@ -89,12 +93,13 @@ The response carries `catalog_digest` and `content_sha256`. Pin the digest if yo
 ## Credentials
 
 Credential-bearing requests (status, validate, rotate, recover, and the pre-test
-token check) must target `https://`. The helper refuses a plaintext
-`X402SOCKS_WEB`, `X402SOCKS_API`, or `X402SOCKS_PAY` override before it reads the
-token or signature, and its curl invocations restrict the transfer and redirects
-to HTTPS so a credential request cannot be silently downgraded. Do not move these
-routes to HTTP. `X402SOCKS_ALLOW_INSECURE_API=1` exists only for a trusted local
-test harness and is not a safe way to reach the public service.
+token check) must target `https://` on an `x402socks.com` host. The helper
+refuses a plaintext or non-x402socks `X402SOCKS_WEB`, `X402SOCKS_API`, or
+`X402SOCKS_PAY` override before it reads the token or signature, and its curl
+invocations restrict the transfer and redirects to HTTPS so a credential request
+cannot be silently downgraded. Do not move these routes to HTTP.
+`X402SOCKS_ALLOW_INSECURE_API=1` exists only for a trusted local test harness and
+is not a safe way to reach the public service.
 
 ### `POST /api/token/status`
 
@@ -251,14 +256,13 @@ const browser = await chromium.launch({
 
 Chrome shows its own credential dialog after the first `407`. Enter the token as **both** username and password.
 
-### Legacy plaintext transports (opt-in)
+### Legacy plaintext transports (not used by this skill)
 
-Only if the client cannot use TLS CONNECT, and only on a network you trust.
-The helper exposes both under `test --plaintext` / `test --socks5` with
-`X402SOCKS_ALLOW_PLAINTEXT=1`; see `scripts/x402socks.sh help`. For hand-written
-clients, use the addresses in the transport table above with the token as both
-username and password. Both put the reusable token on the wire in cleartext; a
-successful TLS request does not protect that hop.
+The helper does not offer SOCKS5 or plaintext CONNECT: both put the reusable
+token on the wire in cleartext, and a successful TLS request to the target does
+not protect that hop. They exist only for a browser that cannot do TLS CONNECT.
+If you must use one, use the addresses in the transport table above with the
+token as both username and password, and only on a network you trust.
 
 ## Rate limits and secrecy
 

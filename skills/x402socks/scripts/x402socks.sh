@@ -57,6 +57,25 @@ if parts.fragment:
 PY
 }
 
+# A valid certificate proves which host answered, not that the host is allowed
+# to receive a token. Credential-bearing commands only target x402socks hosts.
+# A test override needs the explicit insecure opt-in.
+require_trusted_host() {
+  local name="$1" url="$2"
+  python3 - "$name" "$url" <<'PY'
+import sys
+from urllib.parse import urlsplit
+name, url = sys.argv[1], sys.argv[2]
+host = (urlsplit(url).hostname or "").lower()
+if host == "x402socks.com" or host.endswith(".x402socks.com"):
+    raise SystemExit(0)
+sys.exit(
+    "%s host '%s' is not an x402socks host; set "
+    "X402SOCKS_ALLOW_INSECURE_API=1 only for a trusted test" % (name, host)
+)
+PY
+}
+
 # Credential-bearing requests must target https://. A plaintext URL (for
 # example a local test harness) is refused before the token or signature is
 # read, unless the operator explicitly opts in for that trusted environment.
@@ -64,21 +83,26 @@ require_https() {
   local name="$1" url="$2"
   validate_endpoint_url "$name" "$url"
   case "$url" in
-    https://*) return 0 ;;
+    https://*) ;;
     http://*)
       if [ "${X402SOCKS_ALLOW_INSECURE_API:-}" = "1" ]; then
         note "WARNING: $name is plaintext http ($url); credentials will be sent unencrypted"
         return 0
       fi
+      die "$name must be an https:// URL (got '$url'); set X402SOCKS_ALLOW_INSECURE_API=1 only for a trusted local test"
       ;;
     *) die "$name must be an https:// URL (got '$url')" ;;
   esac
-  die "$name must be an https:// URL (got '$url'); set X402SOCKS_ALLOW_INSECURE_API=1 only for a trusted local test"
+  if [ "${X402SOCKS_ALLOW_INSECURE_API:-}" = "1" ]; then
+    note "WARNING: $name host override allowed by X402SOCKS_ALLOW_INSECURE_API=1"
+    return 0
+  fi
+  require_trusted_host "$name" "$url"
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
-req() { curl -sS --max-time "${X402SOCKS_TIMEOUT:-30}" "$@"; }
+req() { curl -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" "$@"; }
 
 pretty() {
   if command -v python3 >/dev/null 2>&1; then
@@ -100,7 +124,7 @@ prepare_token_storage() {
   local file
   file="$(token_file)"
   TOKEN_STAGING="$(python3 -c '
-import os, sys, tempfile
+import os, stat, sys, tempfile
 path = os.path.abspath(sys.argv[1])
 directory = os.path.dirname(path) or "."
 try:
@@ -113,9 +137,16 @@ st = os.stat(directory)
 if st.st_uid != os.getuid() or (st.st_mode & 0o022):
     sys.exit("token directory is not private to the current user: %s" % directory)
 if (st.st_mode & 0o777) != 0o700:
-    os.chmod(directory, 0o700)
-if os.path.islink(path):
-    sys.exit("refusing to replace a symlink token file: %s" % path)
+    sys.exit("token directory must already be mode 700: %s" % directory)
+if os.path.lexists(path):
+    pst = os.lstat(path)
+    if not stat.S_ISREG(pst.st_mode):
+        sys.exit("refusing to replace a non-regular token file: %s" % path)
+    if pst.st_uid != os.getuid():
+        sys.exit("token file is not owned by the current user: %s" % path)
+    if pst.st_mode & 0o077:
+        sys.exit("token file is accessible to group/other (mode %o): %s"
+                 % (pst.st_mode & 0o777, path))
 try:
     fd, staging = tempfile.mkstemp(prefix=".token.", dir=directory)
 except OSError as exc:
@@ -173,18 +204,41 @@ req_secret() {
   {
     printf '%s\n' "$cfg"
     printf 'url = "%s"\n' "$(cfg_escape "$url")"
-  } | curl -sS --max-time "${X402SOCKS_TIMEOUT:-30}" "${proto[@]}" --config - "$@"
+  } | curl -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" "${proto[@]}" --config - "$@"
 }
 
 json_token_body() {
   python3 -c 'import json, sys; print(json.dumps({"token": sys.stdin.read()}))'
 }
 
+# Read a token only from a private regular file. A symlink, a group/world
+# readable file, or a file owned by another user is refused before the bytes
+# are used.
+read_token_file() {
+  python3 - "$1" <<'PY'
+import os, sys
+path = sys.argv[1]
+try:
+    st = os.lstat(path)
+except OSError as exc:
+    sys.exit("cannot read token file: %s" % exc)
+if os.path.islink(path) or not os.path.isfile(path):
+    sys.exit("token file is not a regular file: %s" % path)
+if st.st_uid != os.getuid():
+    sys.exit("token file is not owned by the current user: %s" % path)
+if st.st_mode & 0o077:
+    sys.exit("token file is accessible to group/other (mode %o): %s"
+             % (st.st_mode & 0o777, path))
+with open(path, "r", encoding="utf-8") as fh:
+    sys.stdout.write(fh.read().replace("\r", "").replace("\n", ""))
+PY
+}
+
 resolve_token() {
   local file token
   file="$(token_file)"
-  if [ -s "$file" ]; then
-    token="$(tr -d '\r\n' < "$file")"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    token="$(read_token_file "$file")"
   elif [ "${X402SOCKS_TOKEN:-}" != "" ]; then
     token="$X402SOCKS_TOKEN"
   else
@@ -202,7 +256,7 @@ store_token_response() {
   file="$(token_file)"
   mkdir -p "$(dirname "$file")"
   python3 -c '
-import json, os, sys, tempfile
+import json, os, stat, sys, tempfile
 
 path = os.path.abspath(sys.argv[1])
 token_dir = os.path.dirname(path) or "."
@@ -254,10 +308,20 @@ if st.st_uid != os.getuid() or (st.st_mode & 0o022):
     drop_staging()
     sys.exit("token directory is not private to the current user: %s" % directory)
 if (st.st_mode & 0o777) != 0o700:
-    os.chmod(directory, 0o700)
-if os.path.islink(path):
     drop_staging()
-    sys.exit("refusing to replace a symlink token file: %s" % path)
+    sys.exit("token directory must already be mode 700: %s" % directory)
+if os.path.lexists(path):
+    pst = os.lstat(path)
+    if not stat.S_ISREG(pst.st_mode):
+        drop_staging()
+        sys.exit("refusing to replace a non-regular token file: %s" % path)
+    if pst.st_uid != os.getuid():
+        drop_staging()
+        sys.exit("token file is not owned by the current user: %s" % path)
+    if pst.st_mode & 0o077:
+        drop_staging()
+        sys.exit("token file is accessible to group/other (mode %o): %s"
+                 % (pst.st_mode & 0o777, path))
 
 if staging:
     staging = os.path.abspath(staging)
@@ -319,11 +383,10 @@ x402socks helper
   status                        account status and usage
   validate                      cheap token check (exit 0 = valid)
   rotate                        rotate token; saves the new one, prints no secret
-  test [--tls|--plaintext|--socks5] [exit_id]
-                                confirm egress IP; TLS CONNECT 3129 by default
+  test [exit_id]                confirm egress IP; TLS CONNECT 3129 only
   recover-message <tx_hash>     print the message to EIP-191 sign (no newline)
-  recover <tx_hash> [issued_at]  re-issue a lost token; signature on stdin
-                                (keeps the ownership proof out of argv)
+  recover <tx_hash> <issued_at> re-issue a lost token; signature on stdin
+                                (pass the issued_at from recover-message)
 
 Token source (never argv):
   X402SOCKS_TOKEN_FILE  token file (default ~/.config/x402socks/token, mode 600)
@@ -336,19 +399,13 @@ Budget guard:
 
 Endpoint overrides (advanced):
   X402SOCKS_WEB / X402SOCKS_API / X402SOCKS_PAY
-                        must be https:// URLs; credential-bearing commands
-                        refuse a plaintext override before reading the token
+                        must be https:// x402socks hosts; credential-bearing
+                        commands refuse any other host before reading the token
   X402SOCKS_ALLOW_INSECURE_API=1
-                        override that refusal for a trusted local test only
+                        override the host and scheme checks for a trusted test
+                        only
 
 EOF
-  if [ "${X402SOCKS_ALLOW_PLAINTEXT:-}" = "1" ]; then
-    cat <<'EOF2'
-Plaintext transports (enabled, opt-in):
-  X402SOCKS_ALLOW_PLAINTEXT=1   required for SOCKS5 1080 and plaintext CONNECT 3128
-                                both send the reusable token unencrypted
-EOF2
-  fi
 }
 
 cmd_health() {
@@ -468,11 +525,13 @@ cmd_save_token() {
   token="$(tr -d '\r\n')"
   [ -n "$token" ] || die "no token on stdin"
   validate_token "$token"
-  # Reuse the hardened writer used by rotate/recover: owner + permission
-  # checks, symlink rejection, mkstemp(0600) + fsync + atomic os.replace.
-  # The token travels on stdin only; it is never an argument.
+  # Reserve a private staging file here instead of inheriting an environment
+  # path, then reuse the hardened writer used by rotate/recover.
+  prepare_token_storage
+  export X402SOCKS_TOKEN_STAGING="$TOKEN_STAGING"
   body="$(printf '%s' "$token" | json_token_body)"
   printf '%s' "$body" | store_token_response
+  unset X402SOCKS_TOKEN_STAGING
 }
 
 cmd_status() {
@@ -540,18 +599,17 @@ sys.exit("unknown exit id %s; re-read /nodes.json" % want)
 ' "$want"
 }
 
-# TLS HTTP CONNECT is the default: curl verifies the exit certificate and the
-# token is not sent in cleartext. SOCKS5 (1080) and plaintext CONNECT (3128)
-# are opt-in because both expose the reusable token on the client-to-exit hop.
+# TLS HTTP CONNECT is the only transport this helper uses: curl verifies the
+# exit certificate and the token is never sent in cleartext. SOCKS5 and
+# plaintext CONNECT are legacy browser transports; the helper does not offer
+# them.
 cmd_test() {
-  local mode="tls" exit_id="eu-north1" have_exit=0 token body cfg code ip proxy
+  local exit_id="eu-north1" have_exit=0 token body cfg code ip direct proxy
   while [ $# -gt 0 ]; do
     case "$1" in
-      --tls)       mode="tls" ;;
-      --plaintext) mode="plaintext" ;;
-      --socks5)    mode="socks5" ;;
-      --)          shift; break ;;
-      -*)          die "unknown option: $1" ;;
+      --tls) ;;
+      --)    shift; break ;;
+      -*)    die "unknown option: $1" ;;
       *)
         [ "$have_exit" -eq 0 ] || die "only one exit id may be given"
         exit_id="$1"
@@ -564,22 +622,7 @@ cmd_test() {
 
   require_https "X402SOCKS_WEB" "$WEB"
   check_exit_id "$exit_id"
-
-  case "$mode" in
-    tls)
-      proxy="https://$exit_id.x402socks.com:3129"
-      ;;
-    plaintext|socks5)
-      [ "${X402SOCKS_ALLOW_PLAINTEXT:-}" = "1" ] || \
-        die "$mode sends the reusable token unencrypted; set X402SOCKS_ALLOW_PLAINTEXT=1 to opt in"
-      if [ "$mode" = "plaintext" ]; then
-        proxy="http://$exit_id.x402socks.com:3128"
-      else
-        proxy="socks5h://$exit_id.x402socks.com:1080"
-      fi
-      note "WARNING: $mode authentication is plaintext on the client-to-exit hop"
-      ;;
-  esac
+  proxy="https://$exit_id.x402socks.com:3129"
 
   token="$(resolve_token)"
   body="$(printf '%s' "$token" | json_token_body)"
@@ -587,12 +630,22 @@ cmd_test() {
   code="$(printf '%s' "$cfg" | req_secret "$WEB/api/token/validate" \
           -o /dev/null -w '%{http_code}')"
   [ "$code" = "204" ] || die "token invalid before test (HTTP $code)"
+
+  # Ignore ambient curl config and any NO_PROXY list so the comparison is real:
+  # the direct baseline must not use the proxy, and the proxied request must.
+  direct="$(curl -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" --noproxy '*' https://api.ipify.org)" \
+    || die "direct egress baseline failed"
+  [ -n "$direct" ] || die "direct egress baseline was empty"
+
   cfg="$(printf 'proxy = "%s"\nproxy-user = "%s:%s"' \
         "$(cfg_escape "$proxy")" "$(cfg_escape "$token")" "$(cfg_escape "$token")")"
-  ip="$(printf '%s' "$cfg" | req_secret https://api.ipify.org)" \
-       || die "egress failed via $exit_id ($mode)"
-  printf 'exit: %s\ntransport: %s\negress IP: %s\n' "$exit_id" "$mode" "$ip"
-  note "compare with your direct IP: curl -s https://api.ipify.org"
+  ip="$(printf '%s' "$cfg" | req_secret https://api.ipify.org --noproxy '')" \
+       || die "egress failed via $exit_id (tls)"
+  [ -n "$ip" ] || die "egress IP was empty"
+  [ "$ip" != "$direct" ] || die "egress IP did not change ($ip); the proxy was bypassed"
+
+  printf 'exit: %s\ntransport: tls\ndirect IP: %s\negress IP: %s\n' \
+    "$exit_id" "$direct" "$ip"
 }
 
 cmd_recover_message() {
@@ -603,13 +656,14 @@ cmd_recover_message() {
   note "sign these exact bytes with EIP-191 personal_sign (no trailing newline):"
   printf 'x402socks credential recovery v1\ntx_hash: %s\nissued_at: %s' "$tx" "$issued_at"
   printf '\n\nissued_at: %s (valid +/-10 minutes)\n' "$issued_at" >&2
+  printf 'pass the same issued_at to: recover %s %s\n' "$tx" "$issued_at" >&2
 }
 
 cmd_recover() {
-  [ $# -ge 1 ] || die "usage: recover <tx_hash> [issued_at] (signature on stdin)"
+  [ $# -ge 2 ] || die "usage: recover <tx_hash> <issued_at> (signature on stdin)"
   local tx sig issued_at body cfg
   require_https "X402SOCKS_PAY" "$PAY"
-  tx="$1"; issued_at="${2:-$(date +%s)}"
+  tx="$1"; issued_at="$2"
   IFS= read -r sig || die "no signature on stdin"
   [ -n "$sig" ] || die "empty signature on stdin"
   # The signature is an ownership proof and must not reach a process list.

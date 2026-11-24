@@ -1,7 +1,7 @@
 # Purchase approval
 
 Fill this in before the agent signs anything. An approval is the full set of
-payment terms, not just an amount and not a package name — if the live 402
+payment terms, not just an amount and not a package name. If the live 402
 challenge differs from any field below, the agent must stop.
 
 | Field | Value |
@@ -9,8 +9,8 @@ challenge differs from any field below, the agent must stop.
 | Task / job | |
 | Package ID | |
 | Catalog price (USD) | |
-| **Approved maximum (USD)** | |
-| Approved maximum (atomic USDC, 6 decimals) | |
+| **Approved exact amount (USD)** | |
+| Approved exact amount (atomic USDC, 6 decimals) | |
 | Approved scheme | `exact` |
 | Approved network | `eip155:8453` (Base) |
 | Approved asset contract | |
@@ -31,13 +31,13 @@ must then prove the challenge it is about to sign still matches them.
 1. `GET /api/health` returned `{"status":"ok"}`.
 2. `GET /catalog.json` was read at buy time, not from memory.
 3. `quote` was run and its terms were recorded above.
-4. **Every** entry in the live 402 `accepts[]` was compared to this approval:
-   `scheme`, `network`, `asset`, `payTo`, `extra.name`, `extra.version`, and
-   `amount`. Any mismatch — or more than one distinct option — stops the
-   purchase.
+4. The live 402 `accepts[]` had **exactly one** entry, and it matched this
+   approval field for field: `scheme`, `network`, `asset`, `payTo`,
+   `extra.name`, `extra.version`, and `amount`. Any mismatch, a different
+   amount, or more than one option stops the purchase.
 5. The signer is bound to the single validated requirement, not to a wildcard
    network such as `eip155:*`.
-6. `amount` is at most the approved maximum, in atomic USDC units (6 decimals).
+6. `amount` equals the approved exact amount, in atomic USDC units (6 decimals).
 7. The token was written to a `0600` file; no token was printed or committed.
 8. The signer was a keystore or hardware wallet; no private key appeared in argv,
    a log, or a transcript.

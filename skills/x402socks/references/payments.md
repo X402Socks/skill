@@ -58,7 +58,7 @@ settles.
 ## 2. Approve the full terms before paying
 
 An approval is the whole authorization, not just the amount or a package name:
-scheme, network, asset, recipient, EIP-712 asset domain, and maximum amount must
+scheme, network, asset, recipient, EIP-712 asset domain, and exact amount must
 all be pinned. The signer must be bound to the one requirement that matched.
 
 Run `scripts/x402socks.sh quote <package_id>` first. Record its `network`,
@@ -67,9 +67,11 @@ approved terms (the template is `assets/purchase-approval.md`). Pass them to the
 purchase as values the user approved - never read them from the 402 you are about
 to sign.
 
-Before signing, compare **every** entry in the live 402 `accepts[]` against the
-approval. Abort if any entry differs, or if the list is ambiguous and a client
-could select an unapproved option.
+Before signing, require **exactly one** entry in the live 402 `accepts[]` and
+compare every field against the approval. Abort if the list has more than one
+entry, if any field differs, or if anything is ambiguous. Do not filter the list
+and pick the cheapest survivor; a challenge with an unapproved option is a
+failed challenge, not a menu.
 
 ## 3. TypeScript
 
@@ -78,8 +80,9 @@ npm i @x402/fetch @x402/evm viem
 ```
 
 `@x402/fetch` exposes the hooks needed to enforce this before signing:
-`spendControls` caps value, `policies` filter the advertised requirements, and
-`paymentRequirementsSelector` is the only thing the signer can choose from.
+`spendControls` caps value, `policies` reject a challenge that is not the
+approved one, and `paymentRequirementsSelector` only ever sees the approved
+requirement.
 
 ```ts
 import { wrapFetchWithPaymentFromConfig } from "@x402/fetch";
@@ -88,7 +91,6 @@ import type {
   SelectPaymentRequirements,
 } from "@x402/fetch";
 import { ExactEvmScheme } from "@x402/evm";
-import { privateKeyToAccount } from "viem/accounts";
 
 // Copy these from the quote the user approved. Never derive them from the 402
 // that is about to be signed.
@@ -99,7 +101,7 @@ const APPROVED = {
   payTo: process.env.X402_APPROVED_PAY_TO ?? "",
   assetName: process.env.X402_APPROVED_ASSET_NAME ?? "",
   assetVersion: process.env.X402_APPROVED_ASSET_VERSION ?? "",
-  maxAmountAtomic: BigInt(process.env.X402_APPROVED_MAX_ATOMIC ?? "0"),
+  amountAtomic: BigInt(process.env.X402_APPROVED_AMOUNT_ATOMIC ?? "0"),
 };
 
 if (
@@ -108,56 +110,61 @@ if (
   !APPROVED.payTo ||
   !APPROVED.assetName ||
   !APPROVED.assetVersion ||
-  APPROVED.maxAmountAtomic <= 0n
+  APPROVED.amountAtomic <= 0n
 ) {
   throw new Error("missing approved terms; run `quote` and record its output");
 }
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-// Reject any advertised option that differs from the approval. The selector
-// only ever sees the filtered result, so it cannot pick an unapproved one.
+// Require exactly one advertised option and require it to equal the approval
+// field for field, including the exact amount. More than one option, an exact
+// amount mismatch, or any difference is a failed challenge, not a menu.
 const pinApprovedTerms: PaymentPolicy = (_version, options) => {
-  const approved = options.filter((option) => {
-    const extra = (option.extra ?? {}) as { name?: string; version?: string };
-    return (
-      option.scheme === APPROVED.scheme &&
-      option.network === APPROVED.network &&
-      same(option.asset, APPROVED.asset) &&
-      same(option.payTo, APPROVED.payTo) &&
-      extra.name === APPROVED.assetName &&
-      extra.version === APPROVED.assetVersion &&
-      BigInt(option.amount) <= APPROVED.maxAmountAtomic
-    );
-  });
-  if (approved.length === 0) {
+  if (options.length !== 1) {
     throw new Error(
-      "402 offers no option matching the approved scheme/network/asset/payTo/domain/amount",
+      `402 advertised ${options.length} payment options; approval covers exactly one`,
     );
   }
-  return approved;
-};
-
-// Select only from the policy-filtered list, and prefer the cheapest.
-const selectApproved: SelectPaymentRequirements = (_version, options) => {
-  if (options.length === 0) {
-    throw new Error("no approved payment option survived the policy");
+  const option = options[0];
+  const extra = (option.extra ?? {}) as { name?: string; version?: string };
+  const matches =
+    option.scheme === APPROVED.scheme &&
+    option.network === APPROVED.network &&
+    same(option.asset, APPROVED.asset) &&
+    same(option.payTo, APPROVED.payTo) &&
+    extra.name === APPROVED.assetName &&
+    extra.version === APPROVED.assetVersion &&
+    BigInt(option.amount) === APPROVED.amountAtomic;
+  if (!matches) {
+    throw new Error(
+      "402 challenge differs from the approved scheme/network/asset/payTo/domain/amount",
+    );
   }
-  return options.reduce((best, option) =>
-    BigInt(option.amount) < BigInt(best.amount) ? option : best,
-  );
+  return [option];
 };
 
-// Prefer a keystore/hardware signer in production; never print this key.
-const account = privateKeyToAccount(
-  process.env.EVM_PRIVATE_KEY as `0x${string}`,
-);
+// The selector can only ever return the one requirement the policy approved.
+const selectApproved: SelectPaymentRequirements = (_version, options) => {
+  if (options.length !== 1) {
+    throw new Error("expected exactly one approved payment option");
+  }
+  return options[0];
+};
+
+import type { Account } from "viem";
+
+// The host supplies a non-exportable signer (keystore, hardware wallet, or
+// KMS/HSM). This skill never reads or prints a raw key; see wallet.md.
+declare function loadHostSigner(): Promise<Account>;
+
+const account = await loadHostSigner();
 
 const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, {
   schemes: [{ network: APPROVED.network, client: new ExactEvmScheme(account) }],
-  // Second layer: the library enforces this cap before policies and signing.
+  // Second layer: the library enforces the exact cap before policies and signing.
   spendControls: {
-    maxAmountPerPayment: Number(APPROVED.maxAmountAtomic) / 1_000_000,
+    maxAmountPerPayment: Number(APPROVED.amountAtomic) / 1_000_000,
   },
   policies: [pinApprovedTerms],
   paymentRequirementsSelector: selectApproved,
@@ -199,7 +206,7 @@ APPROVED = {
     "payTo": "0x73BAE3c48d34d71C4CEa76DFdaa3bE2cF4d335a1",
     "assetName": "USD Coin",
     "assetVersion": "2",
-    "max_amount_atomic": 1_000_000,
+    "amount_atomic": 1_000_000,
 }
 
 def approved(req):
@@ -210,7 +217,7 @@ def approved(req):
         and req.get("payTo", "").lower() == APPROVED["payTo"].lower()
         and req.get("extra", {}).get("name") == APPROVED["assetName"]
         and req.get("extra", {}).get("version") == APPROVED["assetVersion"]
-        and int(req.get("amount", "0")) <= APPROVED["max_amount_atomic"]
+        and int(req.get("amount", "0")) == APPROVED["amount_atomic"]
     )
 
 r = httpx.post("https://payments.x402socks.com/v1/access/time_6h", json={})
@@ -220,12 +227,11 @@ raw = r.headers["payment-required"]
 raw += "=" * (-len(raw) % 4)          # base64url may omit padding
 challenge = json.loads(base64.urlsafe_b64decode(raw))
 options = challenge.get("accepts", [])
-approved_options = [option for option in options if approved(option)]
 
-# Refuse ambiguity: an extra option outside the approval must abort.
-if len(options) != 1 or len(approved_options) != 1:
-    raise SystemExit("refusing: the 402 contains options outside the approved terms")
-req = approved_options[0]
+# Require exactly one option and require it to equal the approval exactly.
+if len(options) != 1 or not approved(options[0]):
+    raise SystemExit("refusing: the 402 is not exactly the approved terms")
+req = options[0]
 ```
 
 The preflight alone does not close the race: the retry can carry a different
@@ -275,21 +281,24 @@ tx_hash: 0xSETTLEMENT_TX_HASH
 issued_at: 1792000000
 ```
 
-Then, with the signature written to a private file (never placed in argv):
+Then, with the signature written to a private file (never placed in argv), pass
+back the **same** `issued_at` you signed:
 
 ```bash
+read -r ISSUED_AT < ~/.config/x402socks/recovery.issued_at
 read -r SIGNATURE < ~/.config/x402socks/recovery.sig
-printf '%s\n' "$SIGNATURE" | scripts/x402socks.sh recover 0xSETTLEMENT_TX_HASH
+printf '%s\n' "$SIGNATURE" | scripts/x402socks.sh recover 0xSETTLEMENT_TX_HASH "$ISSUED_AT"
 ```
 
 The signing wallet must be the wallet that paid. `issued_at` must be within
-+/-10 minutes of now. The original `PAYMENT-SIGNATURE` is deliberately rejected:
-it is public settlement calldata that anyone could replay.
++/-10 minutes of now, and the helper sends the timestamp you supply, not a new
+one; a mismatch makes the signature invalid. The original `PAYMENT-SIGNATURE` is
+deliberately rejected: it is public settlement calldata that anyone could replay.
 
 Recovery returns a replacement token once. The helper saves it atomically to the
-`0600` token file and prints only non-secret fields. It refuses a non-HTTPS
-`X402SOCKS_PAY` override before it reads the signature. If you call the endpoint
-directly, build the JSON in a private `0600` file, send it with
+`0600` token file and prints only non-secret fields. It refuses a plaintext or
+non-x402socks `X402SOCKS_PAY` override before it reads the signature. If you call
+the endpoint directly, build the JSON in a private `0600` file, send it with
 `--data-binary @file`, and do not print the raw response - it is the only copy of
 the replacement token.
 
@@ -305,7 +314,8 @@ the replacement token.
 | `502 recovery_unavailable`  | transient; safe to retry later                             |
 
 `scripts/x402socks.sh recover-message <tx_hash>` prints a correctly formatted
-message with a fresh timestamp.
+message with a fresh timestamp and prints the exact `recover` command to run with
+that same timestamp.
 
 ## 8. No wallet = no purchase
 
