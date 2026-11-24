@@ -80,6 +80,12 @@ and pick the cheapest survivor; a challenge with an unapproved option is a
 failed challenge, not a menu. One approval covers one signed authorization. A
 later 402 needs a fresh user decision, not another signature from the old one.
 
+Before claiming an approval, run `scripts/x402socks.sh validate`. A valid token
+means the job is already paid: reconcile and reuse it instead of buying again.
+Then consume the approval before signing by creating its `.consumed` marker with
+exclusive creation. If a claimed approval does not complete, treat it as burned
+and ask the user again; never replay it on a later invocation.
+
 ## 3. TypeScript
 
 ```bash
@@ -92,7 +98,9 @@ npm i @x402/fetch @x402/evm viem
 `paymentRequirementsSelector` only ever sees the approved requirement.
 
 ```ts
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   wrapFetchWithPayment,
   x402Client,
@@ -129,6 +137,10 @@ type Approved = {
   approvedAt: string;
 };
 
+// The only origin this flow will ever pay. This is independent of the approval
+// file: a copied or altered approval cannot redirect the wallet elsewhere.
+const PAYMENT_ORIGIN = "https://payments.x402socks.com";
+
 const approvalPath = process.env.X402_APPROVAL_FILE;
 if (!approvalPath) throw new Error("X402_APPROVAL_FILE is required");
 const APPROVED = JSON.parse(await readFile(approvalPath, "utf8")) as Approved;
@@ -149,6 +161,64 @@ if (!Array.isArray(APPROVED.authorizedTargets) || APPROVED.authorizedTargets.len
 }
 if (!/^\d+$/.test(APPROVED.amountAtomic) || APPROVED.amountAtomic === "0") {
   throw new Error("approved amount must be a positive integer in atomic USDC");
+}
+if (!/^[a-z0-9_-]+$/.test(APPROVED.packageId)) {
+  throw new Error("approved package ID is not a safe path component");
+}
+
+// Pin the provider origin in code. The live request URL is checked again below;
+// never pay on any other origin, scheme, or URL with embedded credentials.
+function assertPinnedOrigin(rawUrl: string): URL {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("request URL is not a valid absolute URL");
+  }
+  if (url.protocol !== "https:" || url.origin !== PAYMENT_ORIGIN) {
+    throw new Error(`request URL is not on ${PAYMENT_ORIGIN}`);
+  }
+  if (url.username || url.password) {
+    throw new Error("request URL must not embed credentials");
+  }
+  return url;
+}
+const approvedUrl = assertPinnedOrigin(APPROVED.requestUrl);
+if (approvedUrl.pathname !== `/v1/access/${APPROVED.packageId}`) {
+  throw new Error("approved request URL is not the approved package");
+}
+
+// Reconcile before paying. A valid token means the job is already paid; use it
+// instead of creating a second authorization.
+const run = promisify(execFile);
+const helper = process.env.X402SOCKS_HELPER ?? "scripts/x402socks.sh";
+async function hasValidToken(): Promise<boolean> {
+  try {
+    await run(helper, ["validate"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+if (await hasValidToken()) {
+  throw new Error(
+    "a valid token already exists; reconcile and reuse it instead of paying again",
+  );
+}
+
+// Consume the approval before any signature. Exclusive creation is atomic: a
+// second process or a later invocation cannot reuse the same record. If signing
+// fails, the approval is burned and a fresh user decision is required.
+const consumedPath = `${approvalPath}.consumed`;
+try {
+  const fh = await open(consumedPath, "wx", 0o600);
+  await fh.write(`${new Date().toISOString()}\n`);
+  await fh.close();
+} catch (err) {
+  if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+    throw new Error("approval was already consumed; ask the user for a fresh decision");
+  }
+  throw err;
 }
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -173,13 +243,14 @@ const optionMatches = (option: {
 };
 
 // This guard receives the challenge and the actual request URL, so a copied
-// client cannot use a fixed purchase URL or a different package.
+// client cannot use a fixed purchase URL or a different package. The origin is
+// checked independently of the approval file and redirects are rejected below.
 function assertApprovedChallenge(challenge: PaymentRequired, requestUrl: string) {
   if (requestUrl !== APPROVED.requestUrl) {
     throw new Error("request URL is not the approved purchase URL");
   }
-  const parsed = new URL(requestUrl);
-  if (!parsed.pathname.endsWith(`/v1/access/${APPROVED.packageId}`)) {
+  const parsed = assertPinnedOrigin(requestUrl);
+  if (parsed.pathname !== `/v1/access/${APPROVED.packageId}`) {
     throw new Error("request URL is not the approved package");
   }
   if (challenge.x402Version !== 2) throw new Error("unexpected x402 version");
@@ -242,8 +313,10 @@ const res = await fetchWithPayment(APPROVED.requestUrl, {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: "{}",
+  redirect: "error", // reject any redirect, never follow one to another host
 });
 if (!res.ok) throw new Error(`purchase failed: ${res.status}`);
+assertPinnedOrigin(res.url);
 
 const data = (await res.json()) as { token?: string };
 if (typeof data.token !== "string") throw new Error("purchase response had no token");
@@ -255,8 +328,19 @@ The wrapper handles the request loop: first request, 402 parse, authorization
 signing, retry with `PAYMENT-SIGNATURE`. The `onPaymentRequired` hook and policy
 run on the challenge that is actually about to be paid, so a URL, package,
 entitlement, signer, price, asset, or recipient change aborts instead of
-signing. The one protocol retry that sends this signed authorization is part of
-the approved purchase. A later 402 is a new decision and needs fresh approval.
+signing. `assertPinnedOrigin` and `redirect: "error"` keep the payment on the
+canonical provider origin; there is no fallback to a pathname suffix match or a
+followed redirect. The one protocol retry that sends this signed authorization is
+part of the approved purchase. A later 402 is a new decision and needs fresh
+approval.
+
+The reconciliation and consumption steps close the replay gap. A valid token
+found before the purchase means the job is already paid, so the client stops and
+reuses it. The `.consumed` sidecar is created before any signature, so the same
+approval cannot authorize a second run even if a process crashes mid-purchase.
+Treat an approval that was claimed but did not complete as burned: reconcile the
+chain and the account, then ask the user for a fresh decision rather than
+reusing it.
 
 ## 4. Python
 
@@ -266,11 +350,15 @@ uv add "x402[httpx,evm]"
 
 Read the live challenge before any signer exists, using the same approved terms.
 The approval file is written from `assets/purchase-approval.md` after the user
-decides. This example contains no payment literals and never creates that file:
+decides. This example contains no payment literals: it never creates the approval
+file, but it does create a `.consumed` marker before any signature.
 
 ```python
-import base64, json, os
+import base64, json, os, subprocess
+from urllib.parse import urlsplit
 import httpx
+
+PAYMENT_ORIGIN = "https://payments.x402socks.com"
 
 path = os.environ.get("X402_APPROVAL_FILE")
 if not path:
@@ -292,13 +380,53 @@ if not approved.get("authorized_targets"):
     raise SystemExit("approval has no authorized target hosts; ask the user again")
 if not approved["amount_atomic"].isdecimal() or int(approved["amount_atomic"]) <= 0:
     raise SystemExit("approved amount must be a positive integer in atomic USDC")
+if not all(c in "abcdefghijklmnopqrstuvwxyz0123456789_-" for c in approved["package_id"]):
+    raise SystemExit("approved package ID is not a safe path component")
+
+# Pin the provider origin in code, independently of the approval file.
+def assert_pinned_origin(raw):
+    u = urlsplit(raw)
+    if u.scheme != "https" or "%s://%s" % (u.scheme, u.netloc) != PAYMENT_ORIGIN:
+        raise SystemExit("request URL is not on %s" % PAYMENT_ORIGIN)
+    if u.username or u.password:
+        raise SystemExit("request URL must not embed credentials")
+    return u
+
+target = assert_pinned_origin(approved["request_url"])
+if target.path != "/v1/access/%s" % approved["package_id"]:
+    raise SystemExit("approved request URL is not the approved package")
+
+# Reconcile before paying: an existing valid token means the job is already paid.
+helper = os.environ.get("X402SOCKS_HELPER", "scripts/x402socks.sh")
+try:
+    subprocess.run(
+        [helper, "validate"], check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+except (OSError, subprocess.CalledProcessError):
+    pass
+else:
+    raise SystemExit(
+        "a valid token already exists; reconcile and reuse it instead of paying again"
+    )
+
+# Consume the approval before any signature. Exclusive creation is atomic.
+consumed = path + ".consumed"
+try:
+    fd = os.open(consumed, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+except FileExistsError:
+    raise SystemExit("approval was already consumed; ask the user for a fresh decision")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write("consumed\n")
+
 signer = os.environ.get("X402_SIGNER_ADDRESS", "").lower()
 if signer != approved["signer_address"].lower():
     raise SystemExit("signer is not the approved paying wallet")
 
-r = httpx.post(approved["request_url"], json={})
+r = httpx.post(approved["request_url"], json={}, follow_redirects=False)
 if r.status_code != 402:
     raise SystemExit("expected 402, got %s" % r.status_code)
+assert_pinned_origin(str(r.url))
 
 raw = r.headers["payment-required"]
 raw += "=" * (-len(raw) % 4)          # base64url may omit padding
@@ -335,8 +463,11 @@ if not (
 The preflight alone does not close the race: the retry can carry a different
 challenge. Apply the same check in the client's policy or selector hook. If it
 has no hook, do not let it auto-pay, read the 402 yourself and sign exactly the
-requirement you validated. Do not re-sign a later 402 from this approval; stop
-and ask for a new decision.
+requirement you validated. `follow_redirects=False` and the pinned-origin check
+keep the request on the canonical provider host. The `validate` reconciliation and
+the exclusive `.consumed` marker mean an existing token or a reused approval
+stops the purchase before any signature. Do not re-sign a later 402 from this
+approval; stop and ask for a new decision.
 
 Pin the network to `eip155:8453` rather than a wildcard like `eip155:*`. A
 wildcard lets the client auto-pay on whatever chain a server advertises, which is
@@ -362,6 +493,9 @@ purchase and the input to recovery. Write the token straight to a file with mode
 
 ## 6. Never pay twice
 
+- Reconcile first. Run `scripts/x402socks.sh status` (or `validate`) and check for
+  a saved settlement tx hash before creating any new authorization. A used
+  approval must be consumed and never replayed.
 - A `502` means the payment settled but provisioning failed. **Do not resend.**
   The payment is already on-chain.
 - A broadcast transfer may wait for confirmations. Confirmation is retried

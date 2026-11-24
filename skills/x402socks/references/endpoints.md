@@ -99,7 +99,10 @@ refuses a plaintext or non-x402socks `X402SOCKS_WEB`, `X402SOCKS_API`, or
 invocations restrict the transfer and redirects to HTTPS so a credential request
 cannot be silently downgraded. Do not move these routes to HTTP.
 `X402SOCKS_ALLOW_INSECURE_API=1` exists only for a trusted local test harness and
-is not a safe way to reach the public service.
+is not a safe way to reach the public service. The `quote` and `recover` commands
+pin `X402SOCKS_PAY` to the exact origin `https://payments.x402socks.com`: another
+host or scheme is refused before any request, unless the explicit insecure
+opt-in is set.
 
 ### `POST /api/token/status`
 
@@ -177,9 +180,11 @@ See `payments.md`. Not listed in `openapi.json` because it is not payable.
 All snippets read the token from the `0600` file and use **TLS CONNECT**. None of
 them puts the token in a command argument. Each snippet also requires an explicit
 target allowlist in `X402SOCKS_ALLOWED_HOSTS` and refuses an empty list or a
-non-HTTPS target. A proxy changes the source IP, not permission to access a site.
-Obey the destination's access rules and do not use rotating egress to evade a
-block, rate limit, or access decision.
+non-HTTPS target. Redirects are disabled (or, in a browser, intercepted) so a
+request cannot reach an unapproved host after the initial check. A proxy changes
+the source IP, not permission to access a site. Obey the destination's access
+rules and do not use rotating egress to evade a block, rate limit, or access
+decision.
 
 ### curl (TLS CONNECT, recommended)
 
@@ -197,14 +202,16 @@ u = sys.argv[1]
 allowed = [h.strip().lower() for h in os.environ.get("X402SOCKS_ALLOWED_HOSTS","").split(",") if h.strip()]
 if not u.startswith("https://") or not allowed or u.split("/")[2].lower() not in allowed:
     sys.exit("target is not in X402SOCKS_ALLOWED_HOSTS")' "$target"
-curl -q --proto '=https' --proto-redir '=https' --config "$cfg" "$target"
+# --max-redirs 0 stops a redirect from reaching a host the allowlist did not check.
+curl -q --proto '=https' --proto-redir '=https' --max-redirs 0 --config "$cfg" "$target"
 ```
 
 `curl -q` ignores ambient curl config, so a local `~/.curlrc` cannot add an
 output or tracing option that exposes the proxy credentials. The proto pins
-block plaintext redirects. `curl` verifies the exit certificate by default. If
-that check fails, the exit is not usable, do not disable verification or fall
-back to plaintext.
+block plaintext redirects and `--max-redirs 0` blocks all redirects, so the
+request cannot leave the approved HTTPS target. `curl` verifies the exit
+certificate by default. If that check fails, the exit is not usable, do not
+disable verification or fall back to plaintext.
 
 ### Python (urllib3, TLS CONNECT) — token sent via `Proxy-Authorization`, never in a URL
 
@@ -225,12 +232,15 @@ http = urllib3.ProxyManager(
     "https://eu-north1.x402socks.com:3129",
     proxy_headers={"Proxy-Authorization": f"Basic {auth}"},
 )
-print(http.request("GET", target).data.decode())
+# redirect=False keeps the request on the allowlisted HTTPS target.
+print(http.request("GET", target, redirect=False).data.decode())
 ```
 
 This needs `urllib3` 2.0+, which supports an HTTPS proxy. The token is put in a
-`Proxy-Authorization` header, not embedded in a URL. If the request does not send
-it on your urllib3 version, use a client that sends `Proxy-Authorization`
+`Proxy-Authorization` header, not embedded in a URL. `redirect=False` stops a
+redirect before it can reach a host the allowlist did not check; handle a 3xx
+explicitly and re-check its target before following it. If the request does not
+send `Proxy-Authorization` on your urllib3 version, use a client that sends it
 explicitly and keep the token out of the proxy URL. The token stays in process
 memory; it is not placed in argv.
 
@@ -255,11 +265,14 @@ const dispatcher = new ProxyAgent({
   token: `Basic ${Buffer.from(`${t}:${t}`).toString("base64")}`,
 });
 
-const { body } = await request(target, { dispatcher });
+// maxRedirections: 0 keeps the request on the allowlisted HTTPS target.
+const { body } = await request(target, { dispatcher, maxRedirections: 0 });
 console.log(await body.text());
 ```
 
-undici's `ProxyAgent` speaks HTTP CONNECT, not SOCKS5.
+undici's `ProxyAgent` speaks HTTP CONNECT, not SOCKS5. `maxRedirections: 0` stops
+a redirect before it can reach a host the allowlist did not check; handle a 3xx
+explicitly and re-check its target before following it.
 
 ### Playwright (TLS CONNECT)
 
@@ -268,16 +281,23 @@ Chromium cannot authenticate to a SOCKS5 proxy, and Playwright's
 `socks5://` entry with credentials fails before it connects. Use the TLS HTTP
 CONNECT listener:
 
+Checking the initial URL is not enough. A redirect, embedded image, script,
+font, or later navigation can reach a host the allowlist never approved. Register
+a request interceptor on the browser context **before** any navigation and abort
+every request whose host is not in the allowlist. Verify the final URL too.
+
 ```js
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { chromium } from "playwright";
 
 const t = readFileSync(`${homedir()}/.config/x402socks/token`, "utf8").trim();
 const target = process.env.X402SOCKS_TARGET_URL ?? "";
 const allowed = (process.env.X402SOCKS_ALLOWED_HOSTS ?? "")
   .split(",").map(h => h.trim().toLowerCase()).filter(Boolean);
+if (!allowed.length) throw new Error("X402SOCKS_ALLOWED_HOSTS is empty");
 const parsed = new URL(target);
-if (parsed.protocol !== "https:" || !allowed.includes(parsed.hostname)) {
+if (parsed.protocol !== "https:" || !allowed.includes(parsed.hostname.toLowerCase())) {
   throw new Error("target is not in X402SOCKS_ALLOWED_HOSTS");
 }
 
@@ -288,17 +308,42 @@ const browser = await chromium.launch({
     password: t,
   },
 });
-const page = await browser.newPage();
-await page.goto(target);
+const context = await browser.newContext();
+// Intercept every request: redirects, embedded resources, and later navigation.
+// The interceptor is installed before the first request and cannot be bypassed
+// by a 3xx or a subresource load.
+await context.route("**/*", route => {
+  const u = new URL(route.request().url());
+  if (u.protocol !== "https:" || !allowed.includes(u.hostname.toLowerCase())) {
+    return route.abort();
+  }
+  return route.continue();
+});
+const page = await context.newPage();
+await page.goto(target, { waitUntil: "load" });
+const final = new URL(page.url());
+if (final.protocol !== "https:" || !allowed.includes(final.hostname.toLowerCase())) {
+  throw new Error("final URL is not in X402SOCKS_ALLOWED_HOSTS");
+}
 ```
 
-### Chrome
+`context.route("**/*")` covers all HTTP(S) requests the context makes. If a
+client cannot intercept every request, do not use it with the proxy.
+
+### Chrome (raw launch is not sufficient)
 
 ```bash
 --proxy-server=https://eu-north1.x402socks.com:3129
 ```
 
-Chrome shows its own credential dialog after the first `407`. Enter the token as **both** username and password. Chrome cannot enforce the target allowlist, so the operator must check `X402SOCKS_ALLOWED_HOSTS` and the destination's access rules before launching.
+Chrome shows its own credential dialog after the first `407`. Enter the token as
+**both** username and password. **Do not use a raw Chrome instance as an agent
+browser with this proxy.** It cannot enforce `X402SOCKS_ALLOWED_HOSTS`: a redirect
+or embedded resource can reach an unapproved host even when the initial URL was
+checked. Use the Playwright example above, which registers `context.route("**/*")`
+before navigation and aborts unapproved requests, or wrap Chrome in an
+allowlisting forward proxy that blocks every unapproved host. If neither is
+possible, do not use a browser with this proxy.
 
 ### Legacy plaintext transports (not used by this skill)
 

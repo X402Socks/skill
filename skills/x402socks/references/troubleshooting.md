@@ -4,11 +4,13 @@ Work down this list in order. It moves from cheapest check to most expensive, so
 
 ## Order of diagnosis
 
-1. `GET /api/health` — is the service up at all?
-2. `GET /nodes.json` — is the exit you chose `disabled: false` and `healthy`?
-3. `POST /api/token/validate` — is the token live?
+1. `scripts/x402socks.sh validate` (or `status`) — is there already a valid
+   token? If so, the job is paid; reconcile and reuse it instead of buying again.
+2. `GET /api/health` — is the service up at all?
+3. `GET /nodes.json` — is the exit you chose `disabled: false` and `healthy`?
 4. Direct request without the proxy — is the target reachable at all?
-5. Only then: retry through the proxy, and only then consider buying again.
+5. Only then: retry through the proxy, and only then consider a new purchase with
+   a fresh, unconsumed approval.
 
 Start every proxy check on TLS CONNECT (`https://<exit>:3129`). This skill and
 the helper use TLS CONNECT only; SOCKS5 (1080) and plaintext CONNECT (3128)
@@ -38,6 +40,7 @@ expose the token on the wire and are not part of the agent workflow.
 | Target sees the wrong country                  | connected to the wrong exit                                          | pick the exit whose `label` matches the region you need      |
 | Target logs your local DNS resolver            | a browser client used `socks5://` instead of `socks5h://`            | browser-only; this skill uses TLS CONNECT, so DNS is not a concern |
 | Works in curl, fails in Playwright/Chromium    | Chromium cannot authenticate to SOCKS5; Playwright proxy auth is HTTP-only | use `server: "https://<exit>:3129"` with username/password; 3128 is plaintext |
+| Browser reaches a host outside `X402SOCKS_ALLOWED_HOSTS` | only the initial URL was checked; a redirect or embedded resource escaped | register `context.route("**/*")` before navigation and abort every unapproved request; verify the final URL; do not use raw Chrome |
 | Throughput collapses mid-job                   | fair-use data cap reached                                            | check usage via `status`; buy a larger plan                  |
 | Second agent fails while first works           | single packages allow 1 active session                               | consolidate, or move to `multi_agent`                        |
 
@@ -45,8 +48,10 @@ expose the token on the wire and are not part of the agent workflow.
 
 An approval covers one signed authorization for one job, package, request URL,
 signer, and exact term set. The protocol retry that sends that signed
-authorization to the same URL is part of the same purchase. Everything below is
-a new decision, not a reason to re-sign from the old approval.
+authorization to the same URL is part of the same purchase. Reconcile with
+`validate` first, and consume the approval with an exclusive `.consumed` marker
+before signing. Everything below is a new decision, not a reason to re-sign from
+the old approval.
 
 - **Provisioning `502`** means the payment settled but provisioning failed. Do
   not retry the purchase. Reconcile and use `recover` with the settlement tx

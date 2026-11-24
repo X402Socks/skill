@@ -100,17 +100,70 @@ require_https() {
   require_trusted_host "$name" "$url"
 }
 
+# The payment origin is narrower than the general x402socks host rule: quotes
+# and recovery must address the canonical provider origin, not any subdomain.
+# A trusted local harness can still override it with the explicit opt-in.
+require_payment_origin() {
+  local name="$1" url="$2"
+  validate_endpoint_url "$name" "$url"
+  case "$url" in
+    http://*)
+      if [ "${X402SOCKS_ALLOW_INSECURE_API:-}" = "1" ]; then
+        note "WARNING: $name is plaintext http ($url); credentials will be sent unencrypted"
+        return 0
+      fi
+      die "$name must be an https:// URL (got '$url'); set X402SOCKS_ALLOW_INSECURE_API=1 only for a trusted local test"
+      ;;
+  esac
+  if [ "${X402SOCKS_ALLOW_INSECURE_API:-}" = "1" ]; then
+    note "WARNING: $name origin override allowed by X402SOCKS_ALLOW_INSECURE_API=1"
+    return 0
+  fi
+  python3 - "$name" "$url" <<'PY'
+import sys
+from urllib.parse import urlsplit
+name, url = sys.argv[1], sys.argv[2]
+parts = urlsplit(url)
+host = (parts.hostname or "").lower()
+if parts.scheme != "https" or host != "payments.x402socks.com":
+    sys.exit("%s must use https://payments.x402socks.com; got '%s'" % (name, url))
+PY
+}
+
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
 req() { curl -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" "$@"; }
 
-pretty() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -m json.tool 2>/dev/null || cat
-  else
-    cat
-  fi
+# Provider text is untrusted input. Refuse control characters, non-ASCII text,
+# and oversized values before any provider field reaches an agent transcript.
+safe_json() {
+  python3 -c '
+import json, sys
+
+MAX = 256
+
+def check(value, path="$"):
+    if isinstance(value, str):
+        if len(value) > MAX or any(ord(c) < 32 or ord(c) > 126 for c in value):
+            sys.exit("provider field %s failed strict text validation" % path)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            check(item, "%s.%s" % (path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            check(item, "%s[%d]" % (path, index))
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit("provider response was not valid JSON")
+check(data)
+json.dump(data, sys.stdout, indent=2)
+sys.stdout.write("\n")
+'
 }
+
+pretty() { safe_json; }
 
 # Credential-bearing responses are printed as an allowlist, not verbatim. Any
 # field that is not named here stays inside the helper and never reaches a
@@ -126,13 +179,21 @@ except json.JSONDecodeError:
 if not isinstance(data, dict):
     sys.exit("unexpected status response shape")
 
-def scalar(value):
-    return value is None or isinstance(value, (str, int, float, bool))
+def scalar(value, field):
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        if len(value) > 256 or any(ord(c) < 32 or ord(c) > 126 for c in value):
+            sys.exit("status field %s failed strict text validation" % field)
+        return value
+    return None
 
 out = {}
 for key in ("status", "valid", "active", "expires_at"):
-    if key in data and scalar(data[key]):
-        out[key] = data[key]
+    if key in data:
+        value = scalar(data[key], key)
+        if value is not None:
+            out[key] = value
 
 groups = {
     "usage": ("bytes_used", "bytes_allowed", "quota_bytes", "used_bytes",
@@ -143,7 +204,12 @@ for parent, keys in groups.items():
     value = data.get(parent)
     if not isinstance(value, dict):
         continue
-    picked = {k: value[k] for k in keys if k in value and scalar(value[k])}
+    picked = {}
+    for k in keys:
+        if k in value:
+            checked = scalar(value[k], "%s.%s" % (parent, k))
+            if checked is not None:
+                picked[k] = checked
     if picked:
         out[parent] = picked
 
@@ -444,7 +510,7 @@ x402socks helper
   catalog [--summary]           package catalog with prices
   price <package_id>            one package's price and entitlements
   quote <package_id>            live 402 terms; requires HTTP 402, one option,
-                                and an atomic amount within X402SOCKS_MAX_USDC
+                                and a mandatory approved X402SOCKS_MAX_USDC cap
   save-token                    read a token from stdin and store it (mode 600)
   status                        account status and usage
   validate                      cheap token check (exit 0 = valid)
@@ -460,15 +526,18 @@ Token source (never argv):
   Run 'save-token' once to create the file.
 
 Budget guard:
-  X402SOCKS_MAX_USDC    approved maximum in USD, max 6 decimals; 'quote' fails
-                        on a non-finite value, a non-402 reply, mixed options,
-                        or an atomic amount above the cap
+  X402SOCKS_MAX_USDC    REQUIRED exact approved maximum in USD, max 6 decimals;
+                        'quote' fails when it is unset, non-finite, negative,
+                        over-precise, on a non-402 reply, mixed options, or when
+                        the atomic amount is above the cap
   X402SOCKS_TIMEOUT     per-request timeout in seconds (default 30)
 
 Endpoint overrides (advanced):
-  X402SOCKS_WEB / X402SOCKS_API / X402SOCKS_PAY
+  X402SOCKS_WEB / X402SOCKS_API
                         must be https:// x402socks hosts; credential-bearing
                         commands refuse any other host before reading the token
+  X402SOCKS_PAY         pinned to https://payments.x402socks.com for quote and
+                        recover; other origins need the explicit insecure opt-in
   X402SOCKS_ALLOW_INSECURE_API=1
                         override the host and scheme checks for a trusted test
                         only
@@ -487,12 +556,33 @@ cmd_nodes() {
 import sys, json
 data = json.load(sys.stdin)["nodes"]
 only = len(sys.argv) > 1 and sys.argv[1] == "--available"
+
+def safe(value, field):
+    if not isinstance(value, str) or len(value) > 256 or any(
+            ord(c) < 32 or ord(c) > 126 for c in value):
+        sys.exit("provider field %s failed strict text validation" % field)
+    return value
+
+def usable(node):
+    if node.get("disabled") or node.get("health") != "healthy":
+        return False
+    return True
+
+def sort_key(node):
+    return safe(node.get("id", ""), "nodes.id")
+
 shown = 0
-for n in sorted(data, key=lambda x: x["id"]):
-    if only and (n.get("disabled") or n.get("health") != "healthy"):
+for n in sorted(data, key=sort_key):
+    if only and not usable(n):
         continue
-    print("%-15s %-38s :%s  %-8s %s" % (
-        n["id"], n["hostname"], n["port"], n["health"], n.get("label", "")))
+    exit_id = safe(n.get("id", ""), "nodes.id")
+    hostname = safe(n.get("hostname", ""), "nodes.hostname")
+    health = safe(n.get("health", ""), "nodes.health")
+    label = safe(n.get("label", ""), "nodes.label")
+    port = n.get("port")
+    if not isinstance(port, int) or isinstance(port, bool):
+        sys.exit("provider field nodes.port failed strict validation")
+    print("%-15s %-38s :%s  %-8s %s" % (exit_id, hostname, port, health, label))
     shown += 1
 print("(%d exits%s)" % (shown, ", usable only" if only else ""), file=sys.stderr)
 ' $only
@@ -502,10 +592,24 @@ cmd_catalog() {
   if [ "${1:-}" = "--summary" ]; then
     req "$WEB/catalog.json" | python3 -c '
 import sys, json
-d = json.load(sys.stdin)
-for p in d["packages"]:
-    print("%-14s $%-7s %-16s %s" % (
-        p["id"], p["price_usd"], p["name"], "; ".join(p.get("entitlements", []))))
+
+def safe(value, field):
+    if not isinstance(value, str) or len(value) > 256 or any(
+            ord(c) < 32 or ord(c) > 126 for c in value):
+        sys.exit("provider field %s failed strict text validation" % field)
+    return value
+
+def safe_price(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        sys.exit("provider field packages.price_usd failed strict validation")
+    return safe(value, "packages.price_usd") if isinstance(value, str) else value
+
+for p in json.load(sys.stdin)["packages"]:
+    pid = safe(p["id"], "packages.id")
+    price = safe_price(p["price_usd"])
+    name = safe(p["name"], "packages.name")
+    ents = [safe(e, "packages.entitlements") for e in p.get("entitlements", [])]
+    print("%-14s $%-7s %-16s %s" % (pid, price, name, "; ".join(ents)))
 '
   else
     req "$WEB/catalog.json" | pretty
@@ -523,7 +627,7 @@ for p in json.load(sys.stdin)["packages"]:
         break
 else:
     sys.exit("package not found: " + want)
-' "$1"
+' "$1" | safe_json
 }
 
 # Print the live 402 terms and fail unless the reply really is a 402 with one
@@ -532,6 +636,10 @@ else:
 cmd_quote() {
   local pkg="${1:-}" cap="${X402SOCKS_MAX_USDC:-}" code hdr decoded tmpdir hdrfile
   [ -n "$pkg" ] || die "usage: quote <package_id>"
+  require_payment_origin "X402SOCKS_PAY" "$PAY"
+  # An approved amount is mandatory. Without it there is nothing to compare the
+  # live 402 against, so an unchecked amount could be presented for approval.
+  [ -n "$cap" ] || die "quote requires X402SOCKS_MAX_USDC: set your exact approved amount (USD, max 6 decimals) before requesting terms"
 
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/x402socks-quote.XXXXXX")"
   hdrfile="$tmpdir/headers"
@@ -590,8 +698,7 @@ print(json.dumps(out, indent=2))
 
   printf '%s\n' "$decoded"
 
-  if [ -n "$cap" ]; then
-    printf '%s' "$decoded" | python3 -c '
+  printf '%s' "$decoded" | python3 -c '
 import json, sys
 from decimal import Decimal, InvalidOperation
 try:
@@ -612,9 +719,6 @@ if amount_atomic > cap_atomic:
              % (sys.argv[1], data["amount_usd"]))
 print("within approved cap ($%s; 1 option)" % sys.argv[1])
 ' "$cap"
-  else
-    note "no X402SOCKS_MAX_USDC set; re-check every amount above before approving"
-  fi
 }
 
 cmd_save_token() {
@@ -688,9 +792,13 @@ import json, sys
 want = sys.argv[1]
 for node in json.load(sys.stdin).get("nodes", []):
     if node.get("id") == want:
-        if node.get("disabled") or node.get("health") != "healthy":
+        health = node.get("health")
+        if not isinstance(health, str) or len(health) > 256 or any(
+                ord(c) < 32 or ord(c) > 126 for c in health):
+            sys.exit("provider field nodes.health failed strict text validation")
+        if node.get("disabled") or health != "healthy":
             sys.exit("exit %s is not usable (health=%s disabled=%s)"
-                     % (want, node.get("health"), node.get("disabled")))
+                     % (want, health, node.get("disabled")))
         sys.exit(0)
 sys.exit("unknown exit id %s; re-read /nodes.json" % want)
 ' "$want"
@@ -759,7 +867,7 @@ cmd_recover_message() {
 cmd_recover() {
   [ $# -ge 2 ] || die "usage: recover <tx_hash> <issued_at> (signature on stdin)"
   local tx sig issued_at body cfg
-  require_https "X402SOCKS_PAY" "$PAY"
+  require_payment_origin "X402SOCKS_PAY" "$PAY"
   tx="$1"; issued_at="$2"
   IFS= read -r sig || die "no signature on stdin"
   [ -n "$sig" ] || die "empty signature on stdin"
@@ -787,7 +895,7 @@ main() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    health)          cmd_health ;;
+    health)          need python3; cmd_health ;;
     nodes)           need python3; cmd_nodes "${1:-}" ;;
     catalog)         need python3; cmd_catalog "${1:-}" ;;
     price)           need python3; cmd_price "$@" ;;

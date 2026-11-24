@@ -64,8 +64,12 @@ do
   set -- $spec
   var="$1"; url="$2"; cmd="$3"; shift 3
   run_case "$var" "$url" "$cmd" "$@"
+  # recover pins the canonical payment origin, so it fails with a stricter
+  # message than the general x402socks host check.
+  want="not an x402socks host"
+  [ "$cmd" = "recover" ] && want="must use https://payments.x402socks.com"
   if [ "$LAST_RC" -ne 0 ] && [ "$LAST_CALLS" -eq 0 ] &&
-     contains "$LAST_OUT" "not an x402socks host"; then
+     contains "$LAST_OUT" "$want"; then
     pass "$cmd refuses $url before any request"
   else
     bad "$cmd host refusal (rc=$LAST_RC calls=$LAST_CALLS) output=$LAST_OUT"

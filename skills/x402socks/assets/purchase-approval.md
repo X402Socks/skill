@@ -56,11 +56,25 @@ Never fill this template from a previous purchase.
 10. The egress IP was checked through the chosen exit and differs from the
     baseline.
 
-## Reuse and retries
+## Reconciliation, single use, and retries
 
-This approval covers one signed authorization. The x402 protocol retry that
-sends that authorization to the same request URL is part of the same purchase.
-A later 402, a 502, an unknown settlement state, a token recovery, or a request
-for a second package all require a new explicit approval. Reconcile the first
-authorization and record its outcome before asking. Never re-sign from a stale
-approval.
+This approval covers **one** signed authorization. It must be reconciled and
+consumed, not merely matched.
+
+1. **Reconcile before claiming.** Run `scripts/x402socks.sh status` (or
+   `validate`) and check for a saved settlement tx hash. If a valid token already
+   exists, the job is paid: reuse it and do not claim this approval.
+2. **Consume before signing.** Create `<approval-file>.consumed` with exclusive
+   creation and mode `0600` (`open(path, "wx", 0o600)` in Node, or
+   `os.open(path, O_WRONLY | O_CREAT | O_EXCL, 0o600)` in Python). If the marker
+   already exists, the approval was used: ask for a fresh decision.
+3. **Retire the record.** After the purchase, rename or delete the approval file
+   so it cannot be presented again. Keep the settlement tx hash for recovery.
+
+The x402 protocol retry that sends that authorization to the same request URL is
+part of the same purchase. A later 402, a 502, an unknown settlement state, a
+token recovery, or a request for a second package all require a new explicit
+approval decision and a fresh approval record. Reconcile the first authorization
+and record its outcome before asking. Never re-sign from a stale or consumed
+approval. An approval that was consumed but did not complete is burned: reconcile
+the chain and account, then ask for a new explicit approval.
