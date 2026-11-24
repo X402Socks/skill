@@ -110,6 +110,27 @@ if (parts.scheme != "https" or host != host_name
 PY
 }
 
+# Public discovery has no credentials, but it must still stay on the documented
+# web origin. A valid certificate from an arbitrary host is not sufficient.
+require_public_origin() {
+  local name="$1" url="$2"
+  validate_endpoint_url "$name" "$url"
+  if [ "${X402SOCKS_ALLOW_INSECURE_API:-}" = "1" ]; then
+    loopback_test_origin "$name" "$url"
+    return 0
+  fi
+  python3 - "$name" "$url" <<'PY'
+import sys
+from urllib.parse import urlsplit
+name, url = sys.argv[1], sys.argv[2]
+parts = urlsplit(url)
+host = (parts.hostname or "").lower()
+if (parts.scheme != "https" or host != "x402socks.com"
+        or parts.port not in (None, 443)):
+    sys.exit("%s must use https://x402socks.com:443; got an untrusted origin" % name)
+PY
+}
+
 # Quotes and recovery are pinned to the exact payment origin, not a subdomain
 # or a non-default port. Only a trusted loopback harness can override it.
 require_payment_origin() {
@@ -416,12 +437,9 @@ if not isinstance(data, dict):
     sys.exit("unexpected response shape; nothing was saved")
 token = data.get("token")
 if not token:
-    # Print field names only, never their values.
+    # Fixed diagnostic: provider-controlled keys must never enter agent output.
     drop_staging()
-    sys.exit(
-        "response did not include a token; nothing was saved (fields: %s)"
-        % (", ".join(sorted(data.keys())) or "none")
-    )
+    sys.exit("response did not include a token; nothing was saved")
 if not isinstance(token, str) or not (8 <= len(token) <= 512):
     drop_staging()
     sys.exit("response token is not a usable string; nothing was saved")
@@ -516,13 +534,19 @@ x402socks helper
   quote <package_id>            live 402 terms; requires HTTP 402, one option,
                                 and a mandatory approved X402SOCKS_MAX_USDC cap
   save-token                    read a token from stdin and store it (mode 600)
-  proxy-config <exit_id>        emit a TLS CONNECT curl config from the checked
-                                0600 token file; pipe it directly to curl
+  check-exit <exit_id>          confirm an exit id is usable from /nodes.json
+  curl <exit_id> <target_url>   fetch an allowlisted HTTPS target through TLS
+                                 CONNECT on 3129; credentials stay inside the
+                                 helper and never reach stdout or argv
   status                        account status and usage
   validate                      cheap token check (exit 0 = valid)
   reconcile                     three-state check for purchases: exit 0 = valid
-                                 token, 10 = definitively none, 1 = inconclusive
+                                 token, 10 = definitively none, 1 = inconclusive;
+                                 a definitive no-token body must carry a known
+                                 provider invalidation code
   rotate                        rotate token; saves the new one, prints no secret
+  verify-approval               verify an operator-signed, one-use decision;
+                                 signature on stdin, no key material in argv
   test [exit_id]                confirm egress IP; TLS CONNECT 3129 only
   recover-message <tx_hash>     print the message to EIP-191 sign (no newline)
   recover <tx_hash> <issued_at> re-issue a lost token; signature on stdin
@@ -539,6 +563,14 @@ Budget guard:
                         over-precise, on a non-402 reply, mixed options, or when
                         the atomic amount is above the cap
   X402SOCKS_TIMEOUT     per-request timeout in seconds (default 30)
+  X402SOCKS_ALLOWED_HOSTS
+                        mandatory exact HTTPS host:port allowlist for 'curl';
+                        a bare host means port 443
+
+Approval verification (operator-provisioned, outside agent write scope):
+  X402SOCKS_APPROVAL_FILE       read-only signed approval record
+  X402SOCKS_APPROVAL_SIGNER     pinned operator approval public address
+  X402SOCKS_APPROVAL_CLAIMS_DIR private 0700 one-use claims directory
 
 Endpoint overrides (advanced):
   X402SOCKS_WEB / X402SOCKS_API
@@ -557,12 +589,14 @@ EOF
 }
 
 cmd_health() {
+  require_public_origin "X402SOCKS_WEB" "$WEB"
   req "$WEB/api/health" | pretty
 }
 
 cmd_nodes() {
   local only=""
   [ "${1:-}" = "--available" ] && only="--available"
+  require_public_origin "X402SOCKS_WEB" "$WEB"
   req "$WEB/nodes.json" | python3 -c '
 import sys, json
 data = json.load(sys.stdin)["nodes"]
@@ -601,6 +635,7 @@ print("(%d exits%s)" % (shown, ", usable only" if only else ""), file=sys.stderr
 }
 
 cmd_catalog() {
+  require_public_origin "X402SOCKS_WEB" "$WEB"
   if [ "${1:-}" = "--summary" ]; then
     req "$WEB/catalog.json" | python3 -c '
 import sys, json
@@ -631,6 +666,7 @@ for p in json.load(sys.stdin)["packages"]:
 
 cmd_price() {
   [ $# -ge 1 ] || die "usage: price <package_id>"
+  require_public_origin "X402SOCKS_WEB" "$WEB"
   req "$WEB/catalog.json" | python3 -c '
 import sys, json
 want = sys.argv[1]
@@ -784,9 +820,10 @@ cmd_validate() {
 
 # Three-state machine-readable reconciliation for purchase clients. Exit 0 means
 # a valid token exists, 10 means a definitive no-token/invalid answer, and 1 means
-# inconclusive. Callers must stop on 1 instead of assuming "no token".
+# inconclusive. A generic transport or HTTP error is never a definitive "no
+# token": the provider must name a recognized invalidation code in the body.
 cmd_reconcile() {
-  local token body cfg code file
+  local token body cfg code file tmpdir state
   require_https "X402SOCKS_WEB" "$WEB"
   file="$(token_file)"
   # Only the absence of any token source is definitive. An existing but
@@ -800,10 +837,15 @@ cmd_reconcile() {
     printf '{"state":"inconclusive"}\n'
     return 1
   }
+
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/x402socks-reconcile.XXXXXX")"
+  RECONCILE_TMPDIR="$tmpdir"
+  trap 'rm -rf "$RECONCILE_TMPDIR"' EXIT
+
   body="$(printf '%s' "$token" | json_token_body)"
   cfg="$(printf 'header = "content-type: application/json"\ndata = "%s"' "$(cfg_escape "$body")")"
   if ! code="$(printf '%s' "$cfg" | req_secret "$WEB/api/token/validate" \
-               -X POST -o /dev/null -w '%{http_code}')"; then
+               -X POST --max-filesize 65536 -o "$tmpdir/body" -w '%{http_code}')"; then
     printf '{"state":"inconclusive"}\n'
     return 1
   fi
@@ -813,8 +855,44 @@ cmd_reconcile() {
       return 0
       ;;
     401|403|404|410)
-      printf '{"state":"no_valid_token"}\n'
-      return 10
+      # Fixed provider-specific codes only. The body is parsed but never echoed:
+      # an unexpected key, an instruction, or a control character is inconclusive.
+      state="$(python3 - "$tmpdir/body" "$code" <<'PY'
+import json, sys
+
+DEFINITIVE = {
+    ("401", "invalid_token"),
+    ("401", "token_expired"),
+    ("401", "token_revoked"),
+    ("403", "account_inactive"),
+    ("404", "token_not_found"),
+    ("410", "plan_expired"),
+}
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    print("inconclusive")
+    sys.exit(0)
+if not isinstance(data, dict):
+    print("inconclusive")
+    sys.exit(0)
+code = data.get("code")
+error = data.get("error")
+if not isinstance(code, str) and isinstance(error, str):
+    code = error
+if (sys.argv[2], code) in DEFINITIVE:
+    print("no_valid_token")
+else:
+    print("inconclusive")
+PY
+)" || state="inconclusive"
+      if [ "$state" = "no_valid_token" ]; then
+        printf '{"state":"no_valid_token"}\n'
+        return 10
+      fi
+      printf '{"state":"inconclusive"}\n'
+      return 1
       ;;
     *)
       printf '{"state":"inconclusive"}\n'
@@ -849,6 +927,7 @@ valid_exit_id() {
 check_exit_id() {
   local want="$1"
   valid_exit_id "$want" || die "invalid exit id '$want' (lowercase letters, digits, hyphen only)"
+  require_public_origin "X402SOCKS_WEB" "$WEB"
   req "$WEB/nodes.json" | python3 -c '
 import json, sys
 
@@ -867,24 +946,234 @@ sys.exit("unknown exit id %s; re-read /nodes.json" % want)
 ' "$want"
 }
 
-# Emit a curl config for the selected TLS exit. Callers must pipe this directly
-# to curl: the output contains the token and must never appear in a transcript.
-# The token passes through the same private-file checks as status and rotate.
-cmd_proxy_config() {
-  local exit_id="${1:-}" token
-  [ -n "$exit_id" ] || die "usage: proxy-config <exit_id>"
-  [ "$#" -eq 1 ] || die "usage: proxy-config <exit_id>"
+cmd_check_exit() {
+  [ $# -eq 1 ] || die "usage: check-exit <exit_id>"
+  check_exit_id "$1"
+}
+
+# A target is allowed only when it is in the explicit per-job allowlist. Host
+# entries may include an exact port; a bare host means HTTPS default 443.
+validate_target_url() {
+  local target="$1"
+  reject_unsafe_text "target URL" "$target"
+  python3 - "$target" <<'PY'
+import os, sys
+from urllib.parse import urlsplit
+
+target = sys.argv[1]
+try:
+    u = urlsplit(target)
+except ValueError:
+    sys.exit("target URL is not valid")
+if u.scheme != "https" or not u.hostname:
+    sys.exit("target is not in X402SOCKS_ALLOWED_HOSTS")
+if u.username is not None or u.password is not None:
+    sys.exit("target URL must not embed credentials")
+if u.fragment:
+    sys.exit("target URL must not include a fragment")
+try:
+    port = u.port
+except ValueError:
+    sys.exit("target URL has an invalid port")
+host = u.hostname.lower()
+entries = set()
+for raw in os.environ.get("X402SOCKS_ALLOWED_HOSTS", "").split(","):
+    raw = raw.strip().lower()
+    if not raw:
+        continue
+    if raw.startswith("[") and "]" in raw:
+        entries.add((raw[1:raw.index("]")], raw[raw.index("]") + 2:] or "443"))
+    elif raw.count(":") == 1:
+        h, p = raw.rsplit(":", 1)
+        entries.add((h, p or "443"))
+    else:
+        entries.add((raw, "443"))
+if not entries or (host, str(port or 443)) not in entries:
+    sys.exit("target is not in X402SOCKS_ALLOWED_HOSTS")
+PY
+}
+
+# Check the token before any target traffic starts. A dead token and a dead exit
+# look the same, so a failed or ambiguous check stops the fetch.
+assert_token_valid() {
+  local token body cfg code
   require_https "X402SOCKS_WEB" "$WEB"
-  check_exit_id "$exit_id"
   token="$(resolve_token)"
-  printf 'proxy = "https://%s.x402socks.com:3129"\n' "$exit_id"
-  printf 'proxy-user = "%s:%s"\n' "$token" "$token"
+  body="$(printf '%s' "$token" | json_token_body)"
+  cfg="$(printf 'header = "content-type: application/json"\ndata = "%s"' "$(cfg_escape "$body")")"
+  if ! code="$(printf '%s' "$cfg" | req_secret "$WEB/api/token/validate" \
+               -X POST -o /dev/null -w '%{http_code}')"; then
+    die "token preflight was inconclusive; do not send target traffic"
+  fi
+  [ "$code" = "204" ] || die "token is not valid before fetch (HTTP $code)"
+}
+
+# Consume proxy credentials inside the helper. Nothing secret is written to
+# stdout, a file, or argv. Ambient proxy environment settings and NO_PROXY are
+# cleared, curl config files are ignored with -q, and redirects are disabled so
+# the request cannot leave the exact allowlisted HTTPS destination.
+cmd_fetch() {
+  local exit_id="${1:-}" target="${2:-}" proxy token cfg
+  [ -n "$exit_id" ] && [ -n "$target" ] || die "usage: curl <exit_id> <target_url>"
+  [ "$#" -eq 2 ] || die "usage: curl <exit_id> <target_url>"
+  require_https "X402SOCKS_WEB" "$WEB"
+  validate_target_url "$target"
+  check_exit_id "$exit_id"
+  assert_token_valid
+
+  proxy="https://$exit_id.x402socks.com:3129"
+  token="$(resolve_token)"
+  cfg="$(printf 'proxy = "%s"\nproxy-user = "%s:%s"\nurl = "%s"\n' \
+         "$(cfg_escape "$proxy")" "$(cfg_escape "$token")" \
+         "$(cfg_escape "$token")" "$(cfg_escape "$target")")"
+  printf '%s\n' "$cfg" | env \
+    -u CURL_HOME -u curlrc \
+    -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
+    curl -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" \
+    --proto '=https' --proto-redir '=https' --max-redirs 0 \
+    --noproxy '' --globoff --config -
+}
+
+# Verify an operator-signed or broker-issued approval before a wallet signature.
+# The approval file is read-only input: its hash is an integrity check, and the
+# detached EIP-191 signature is the authorization. The pinned signer address and
+# the claims directory must be provisioned by the operator outside the agent's
+# writable workspace. The local claim is a second layer; a broker's one-use
+# state, when available, is authoritative.
+cmd_verify_approval() {
+  local file="${X402SOCKS_APPROVAL_FILE:-}" signer="${X402SOCKS_APPROVAL_SIGNER:-}"
+  local claims="${X402SOCKS_APPROVAL_CLAIMS_DIR:-}" sig checked pair id hash msg
+  need cast
+  [ -n "$file" ] || die "X402SOCKS_APPROVAL_FILE is required"
+  [ -n "$signer" ] || die "X402SOCKS_APPROVAL_SIGNER is required (pinned approval public address)"
+  [ -n "$claims" ] || die "X402SOCKS_APPROVAL_CLAIMS_DIR is required"
+  IFS= read -r sig || die "no approval signature on stdin"
+  [ -n "$sig" ] || die "empty approval signature on stdin"
+  python3 - "$sig" <<'PY'
+import re, sys
+if not re.fullmatch(r"0x[0-9a-fA-F]{130}", sys.argv[1]):
+    sys.exit("approval signature is not a 65-byte EIP-191 signature")
+PY
+
+  pair="$(python3 - "$file" "$signer" <<'PY'
+import hashlib, json, os, re, stat, sys
+from urllib.parse import urlsplit
+
+path, signer = sys.argv[1], sys.argv[2]
+if not re.fullmatch(r"0x[0-9a-fA-F]{40}", signer):
+    sys.exit("approval signer is not an EVM address")
+st = os.lstat(path)
+if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+    sys.exit("approval must be a regular read-only file")
+if st.st_uid not in (0, os.getuid()):
+    sys.exit("approval file is not owned by this user or by root")
+if st.st_mode & 0o222:
+    sys.exit("approval file must be read-only for every user")
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    sys.exit("approval file is not valid JSON")
+if not isinstance(data, dict):
+    sys.exit("approval file is not an object")
+
+approval_id = data.get("approval_id", "")
+approval_hash = data.get("approval_hash", "")
+if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", approval_id):
+    sys.exit("approval has no fresh lowercase UUID approval_id")
+if not re.fullmatch(r"[0-9a-f]{64}", approval_hash):
+    sys.exit("approval has no valid approval_hash")
+
+excluded = {"approval_hash", "approval_signature", "signature"}
+canonical = {k: v for k, v in data.items() if k not in excluded}
+computed = hashlib.sha256(
+    json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+if computed != approval_hash:
+    sys.exit("approval hash does not match the signed record")
+
+def text(key):
+    value = data.get(key)
+    if not isinstance(value, str) or not value or len(value) > 256:
+        sys.exit("approval is missing or has an invalid " + key)
+    if any(ord(c) < 32 or ord(c) > 126 for c in value):
+        sys.exit("approval contains unsafe text in " + key)
+    return value
+
+required = (
+    "job", "request_url", "package_id", "resource_url", "resource_description",
+    "service_name", "scheme", "network", "asset", "pay_to", "asset_name",
+    "asset_version", "amount_atomic", "signer_address", "approval_signer",
+    "approved_by", "approved_at",
+)
+for key in required:
+    text(key)
+targets = data.get("authorized_targets")
+if not isinstance(targets, list) or not targets:
+    sys.exit("approval has no authorized target hosts")
+for host in targets:
+    if not isinstance(host, str) or not host or len(host) > 253:
+        sys.exit("approval has an invalid target host")
+    if any(ord(c) < 32 or ord(c) > 126 for c in host):
+        sys.exit("approval has an invalid target host")
+for key in ("asset", "pay_to", "signer_address", "approval_signer"):
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", data[key]):
+        sys.exit("approval has an invalid " + key)
+if data["approval_signer"].lower() != signer.lower():
+    sys.exit("approval signer does not match the pinned operator address")
+if data["scheme"] != "exact" or data["network"] != "eip155:8453":
+    sys.exit("approval does not pin the exact Base USDC terms")
+if not re.fullmatch(r"[a-z0-9_-]+", data["package_id"]):
+    sys.exit("approved package ID is not a safe path component")
+if not data["amount_atomic"].isdecimal() or int(data["amount_atomic"]) <= 0:
+    sys.exit("approved amount must be a positive integer in atomic USDC")
+
+u = urlsplit(data["request_url"])
+expected = "https://payments.x402socks.com/v1/access/" + data["package_id"]
+if (u.scheme != "https" or (u.hostname or "").lower() != "payments.x402socks.com"
+        or u.port not in (None, 443) or u.username is not None
+        or u.password is not None or u.query or u.fragment
+        or data["request_url"] != expected):
+    sys.exit("approved request URL is not the pinned payment origin and package")
+print(approval_id)
+print(computed)
+PY
+)" || die "approval did not pass the local integrity check"
+  id="$(printf '%s\n' "$pair" | sed -n '1p')"
+  hash="$(printf '%s\n' "$pair" | sed -n '2p')"
+  msg="$(printf 'x402socks approval v1\n%s' "$hash")"
+
+  cast wallet verify -q --address "$signer" "$msg" "$sig" \
+    || die "approval signature did not verify against the pinned signer"
+
+  python3 - "$claims" "$id" <<'PY'
+import os, stat, sys
+from datetime import datetime, timezone
+
+directory = os.path.abspath(sys.argv[1])
+approval_id = sys.argv[2]
+if os.path.islink(directory) or not os.path.isdir(directory):
+    sys.exit("approval claims directory is not a real directory")
+st = os.stat(directory)
+if st.st_uid != os.getuid() or (st.st_mode & 0o777) != 0o700:
+    sys.exit("approval claims directory must be mode 700 and owned by this user")
+path = os.path.join(directory, approval_id + ".consumed")
+try:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+except FileExistsError:
+    sys.exit("approval ID was already claimed; ask for a fresh decision")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write(datetime.now(timezone.utc).isoformat() + "\n")
+PY
+
+  printf '{"state":"approved"}\n'
 }
 
 # TLS HTTP CONNECT is the only transport this helper uses: curl verifies the
-# exit certificate and the token is never sent in cleartext. SOCKS5 and
-# plaintext CONNECT are legacy browser transports; the helper does not offer
-# them.
+# exit certificate and the token is never sent in cleartext. Alternate proxy
+# dialects and plaintext CONNECT are legacy browser transports; the helper does
+# not offer them.
 cmd_test() {
   local exit_id="eu-north1" have_exit=0 token body cfg code ip direct proxy
   while [ $# -gt 0 ]; do
@@ -994,11 +1283,13 @@ main() {
     price)           need python3; cmd_price "$@" ;;
     quote)           need python3; cmd_quote "${1:-}" ;;
     save-token)      cmd_save_token ;;
-    proxy-config)    need python3; cmd_proxy_config "$@" ;;
+    check-exit)      need python3; cmd_check_exit "$@" ;;
+    curl)            need python3; cmd_fetch "$@" ;;
     status)          need python3; cmd_status ;;
     validate)        need python3; cmd_validate ;;
     reconcile)       need python3; cmd_reconcile ;;
     rotate)          need python3; cmd_rotate ;;
+    verify-approval) need cast; cmd_verify_approval ;;
     test)            need python3; cmd_test "$@" ;;
     recover-message) cmd_recover_message "$@" ;;
     recover)         need python3; cmd_recover "$@" ;;

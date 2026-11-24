@@ -1,10 +1,10 @@
 # x402socks skill
 
-An agent skill for [x402socks.com](https://x402socks.com): anonymous proxy
-egress for AI agents (TLS HTTP CONNECT only), bought per job in USDC on Base
-through the [x402](https://x402.org) protocol. No signup, no card. The agent
-quotes a price, pays, receives a one-time proxy token, and routes traffic
-through a global exit pool.
+An agent skill for [x402socks.com](https://x402socks.com): TLS HTTP CONNECT
+egress for authorized agent traffic, bought per job in USDC on Base through the
+[x402](https://x402.org) protocol. No signup, no card. The agent quotes a price,
+pays after explicit approval, receives a one-time proxy token, and routes
+authorized traffic through a global exit pool.
 
 **Repository:** [github.com/X402Socks/skill](https://github.com/X402Socks/skill)
 **Directory:** [skills.sh/X402Socks/skill](https://skills.sh/X402Socks/skill)
@@ -39,17 +39,24 @@ wallet access there is no way to buy a package.
   `https://base-rpc.publicnode.com`, `https://1rpc.io/base`,
   `https://base.drpc.org`.
 
+Public RPC operators can associate the queried wallet address with the caller's
+source IP and request metadata. Use an operator-controlled Base RPC if that is
+not acceptable.
+
 **Never print or output the private key in a terminal, log, chat, or commit, and
 never pass it as a command argument.** Use an encrypted keystore or hardware
-wallet; keep the keystore and password file at mode `0600`. If the agent cannot
-access a signer, it cannot buy anything.
+wallet; keep the keystore and password file at mode `0600`. Mode `0600` does not
+isolate those files from other code running as the same OS user, so give the
+agent access only to a signer intended for this job. If the agent cannot access
+a signer, it cannot buy anything.
 
 Full `cast` recipes: [`skills/x402socks/references/wallet.md`](skills/x402socks/references/wallet.md).
 
 ## Who it's for
 
-- **Agents that need a different source IP** - geo-specific egress, rate-limit
-  hygiene, or keeping the operator's IP out of third-party logs.
+- **Agents that need a different source IP** for an authorized target, such as
+  geo-specific egress or a network path from a different provider. Targets must
+  allow automated access.
 - **Developers running autonomous agents** that should be able to acquire
   network access on their own, with a spending guardrail built in.
 - **People evaluating x402** as a payment rail, since this is a complete
@@ -82,14 +89,17 @@ approval, completes the x402 payment, and uses the token.
 
 ### What it will and won't do
 
-- It **quotes before spending** and defaults to the cheapest package ($1 / 6
-  hours / 1 GB). You approve the **full payment terms** - scheme, network, asset,
-  recipient, asset domain, and exact amount - and the client requires exactly one
-  live 402 `accepts[]` option that matches them before signing.
-- It **stores the token** in a `0600` file and keeps it out of process
-  arguments, logs, and transcripts.
+- It **quotes before spending** and starts with a low-cost package ($1 / 6
+  hours / 1 GB). You approve the **full payment terms**: scheme, network, asset,
+  recipient, asset domain, and exact amount. The client requires exactly one
+  live 402 `accepts[]` option that matches those terms, with no cheapest-option
+  selection.
+- It **verifies a signed, one-use approval** before a wallet signature and
+  **stores the token** in a `0600` file, keeping it out of process arguments,
+  logs, and transcripts.
 - It **recovers a lost token** from a settled payment instead of buying again,
-  and **rotates** a token on any hint of exposure.
+  with a fresh signed approval before any recovery signature, and **rotates** a
+  token on any hint of exposure.
 - It **stops and asks** if a target's terms forbid automated access - a proxy
   changes your source IP, not the agreement.
 

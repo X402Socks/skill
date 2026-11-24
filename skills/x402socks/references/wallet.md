@@ -20,7 +20,11 @@ you to print a private key.
 
 Create the keystore password file with an editor or password manager, mode
 `0600`; do not type the password into a command line or shell history.
-`cast wallet import` prompts for the private key without echoing it.
+`cast wallet import` prompts for the private key without echoing it. Mode `0600`
+limits access to the same OS user, so any code running as that user, including an
+agent with shell access, can read both files. Give the agent access only to a
+keystore intended for this job, and never paste a private key into a command,
+log, chat, or commit.
 
 The x402 purchase is an EIP-3009 `TransferWithAuthorization` signature. The
 facilitator submits the transfer, so the payer needs USDC but **no ETH** for
@@ -48,6 +52,11 @@ transactions; do not use them for bulk work. If one is rate-limited, try another
 - `https://base-rpc.publicnode.com`
 - `https://1rpc.io/base`
 - `https://base.drpc.org`
+
+A public RPC operator can associate the queried wallet address with the caller's
+source IP and request metadata. That is normal for a shared public endpoint. If
+that disclosure is not acceptable for the operator, use a Base RPC endpoint the
+operator controls instead; the `cast` commands are unchanged.
 
 ## Address and balance
 

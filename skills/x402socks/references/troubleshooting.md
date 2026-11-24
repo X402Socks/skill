@@ -29,11 +29,11 @@ that appear inside it.
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
 | `Could not resolve proxy` | typo in hostname, or exit host does not exist | re-read `hostname` from `/nodes.json` |
-| `Connection refused` on 3129 | that exit has no TLS listener | pick one of `eu-north1`, `asia-central2`, or `asia-west1` |
+| `Connection refused` on 3129 | that exit has no TLS listener | re-read `/nodes.json` and pick a healthy exit with a TLS listener |
 | TLS handshake / certificate error on 3129 | exit cert expired or hostname mismatch | try another TLS exit; do not disable verification |
 | `CONNECT tunnel failed, response 407` | no credentials sent, expected without a token | pass the token as both username and password |
 | `HTTP/1.1 407 Proxy Authentication Required` | client reached the proxy but sent no or blank credentials | check the token is not empty or truncated |
-| Proxy auth rejected / connection closed early | token wrong, expired, or already rotated | `reconcile`, then `status`, then `recover` |
+| Proxy auth rejected / connection closed early | token wrong, expired, or already rotated | `reconcile`; only a definitive no-token permits a fresh signed approval; recovery needs its own fresh approval |
 | `401 invalid_token` on status | token unknown or expired | check plan expiry; recover if the payment settled |
 | `400 invalid_request` on status | sent `Authorization` instead of `{"token": ...}` body | use `scripts/x402socks.sh status` |
 | `must use https://...:443` or `got an untrusted origin` | endpoint override is not the exact provider origin and port | use the default HTTPS endpoint; the loopback opt-in is for a trusted local test only |
@@ -41,7 +41,7 @@ that appear inside it.
 | `402` again after `PAYMENT-SIGNATURE` | amount, asset, `payTo`, resource, or network changed since the quote | stop, reconcile settlement, then get fresh explicit approval; never sign from the old approval |
 | `402` with `maxTimeoutSeconds` elapsed | authorization signed too long ago, default 300s | stop and get fresh explicit approval; do not re-sign from the stale approval |
 | `404 package_not_found` | package id not in the public catalog | use an id from `/catalog.json` |
-| `502` on access | payment settled, provisioning failed | **do not repay**; use `recover` with the tx hash |
+| `502` on access | payment settled, provisioning failed | **do not repay**; reconcile, get fresh signed approval, then use `recover` with the tx hash |
 | `403 ownership_not_proven` on recover | signed with a different wallet than the one that paid | stop and ask the operator to use the paying wallet's signer |
 | `400 stale_recovery` | `issued_at` older than 10 minutes | regenerate the message, then pass its `issued_at` to `recover` |
 | `X402SOCKS_BASELINE_IP` is required | consent to a direct IP fetch has not been given | supply a trusted baseline IP or set `X402SOCKS_ALLOW_DIRECT_BASELINE=1` explicitly |
@@ -53,16 +53,17 @@ that appear inside it.
 
 Never use a raw browser as an agent browser with this proxy. A redirect, service
 worker, embedded resource, or WebRTC path can reach a host the initial URL check
-never approved. Use the Playwright recipe in `endpoints.md`, which sets
-`serviceWorkers: "block"`, passes `--disable-webrtc`, and registers
-`context.route("**/*")` before navigation. If a client cannot enforce all three
-properties, wrap it in an allowlisting forward proxy or do not use it with this
-proxy.
+never approved. Use the shipped `scripts/x402socks-browser.mjs` runner from an
+operator-trusted copy. It sets `serviceWorkers: "block"`, passes
+`--disable-webrtc`, registers `context.route("**/*")` before navigation, uses
+`route.fetch({ maxRedirects: 0 })`, and validates every request and every
+resolved redirect against the allowlist. If a client cannot do the same, wrap it
+in an allowlisting forward proxy or do not use it with this proxy.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| Browser reaches a host outside `X402SOCKS_ALLOWED_HOSTS` | only the initial URL was checked, or a service worker escaped routing | block service workers, disable WebRTC, register `context.route("**/*")`, abort unapproved requests, and verify the final URL |
-| Works in curl, fails in Playwright or Chromium | browser proxy authentication is not HTTP CONNECT | use `server: "https://<exit>:3129"` with username and password from `proxy-config` |
+| Browser reaches a host outside `X402SOCKS_ALLOWED_HOSTS` | only the initial URL was checked, or a service worker escaped routing | use the shipped runner: block service workers, disable WebRTC, register `context.route("**/*")`, use `maxRedirects: 0`, validate every redirect, and verify the final URL |
+| Works with helper `curl`, fails in the browser | browser proxy authentication is not HTTP CONNECT | use the shipped Playwright runner with `server: "https://<exit>:3129"`; never print or paste the token |
 
 ## Retry policy
 
@@ -72,11 +73,13 @@ authorization to the same URL is part of the same purchase. Reconcile with
 `reconcile` first. An exit 0 stops before any signature; an exit 1 stops for
 diagnosis; only exit 10 permits a new authorization. Verify the approval hash and
 claim the approval ID with an exclusive `0600` marker before signing. Everything
-below is a new decision, not a reason to re-sign from the old approval.
+below is a new decision, not a reason to re-sign from the old approval. Every
+new decision must be operator-signed and pass `verify-approval` before a wallet
+signature; an unkeyed hash and a local marker alone are not consent.
 
 - **Provisioning `502`** means the payment settled but provisioning failed. Do
-  not retry the purchase. Reconcile and use `recover` with the settlement tx
-  hash.
+  not retry the purchase. Reconcile, get fresh signed approval, and use `recover`
+  with the settlement tx hash.
 - **`recovery_unavailable` (502)** is safe to retry later, with backoff. It does
   not authorize another payment.
 - **Network timeouts through the proxy** allow one retry of the same request
@@ -84,15 +87,16 @@ below is a new decision, not a reason to re-sign from the old approval.
   the target is down. This does not create a new payment.
 - **A later 402, an unknown settlement state, a token recovery, or a changed
   package, URL, resource, or amount** requires fresh explicit approval. Parse
-  the new challenge, report it, wait for a clear yes, and record a new approval.
-  Never sign the new challenge with the old approval.
+  the new challenge, report it, wait for a clear yes, record a new approval, and
+  pass `verify-approval`. Never sign the new challenge with the old approval.
 
 ## When to stop and ask the user
 
 - Any error that suggests money was taken but access was not granted.
 - Any request to buy a second package for the same job.
 - Any later 402 after a signed authorization, before any re-signing.
-- An inconclusive reconcile result, or an approval whose hash does not verify.
+- An inconclusive reconcile result, an approval whose hash does not verify, or
+  an approval signature that does not pass `verify-approval`.
 - A target outside `X402SOCKS_ALLOWED_HOSTS`, or a site whose access rules
   prohibit automated access. A proxy changes your IP, not the legality or the
   terms of service you agreed to.

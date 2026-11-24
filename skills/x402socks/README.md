@@ -1,9 +1,10 @@
 # x402socks skill
 
-An [Agent Skill](https://agentskills.io) for buying short-lived anonymous proxy
-egress with USDC on Base through [x402](https://x402.org). TLS HTTP CONNECT is
-the only transport the skill uses; SOCKS5 and plaintext CONNECT are legacy
-browser options.
+An [Agent Skill](https://agentskills.io) for buying short-lived proxy egress
+from a different source IP or a specific region for targets you are authorized
+to access. It pays in USDC on Base through [x402](https://x402.org). TLS HTTP
+CONNECT on 3129 is the only transport the skill uses; SOCKS5 and plaintext
+CONNECT are not part of its workflows.
 
 The skill teaches an agent to quote a package, get approval for an exact amount,
 complete the x402 v2 payment, store the one-time token safely, route traffic

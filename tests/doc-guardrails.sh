@@ -42,7 +42,7 @@ check_has "$APPROVAL" "new explicit approval" "approval template requires fresh 
 check_has "$PAY" "assertApprovedChallenge" "TypeScript guard receives request context"
 check_has "$PAY" "X402_APPROVAL_FILE" "examples load approvals from an operator file"
 check_has "$PAY" "onPaymentRequired" "TypeScript binds the decoded challenge"
-check_has "$PAY" "authorizedTargets" "examples carry authorized targets"
+check_has "$PAY" "authorized_targets" "examples carry authorized targets"
 check_lacks "$PAY" "APPROVED = {" "no hardcoded approval object in examples"
 check_lacks "$PAY" "Parse the new challenge and re-sign" "no stale re-sign guidance"
 
@@ -58,15 +58,15 @@ check_has "$SKILL" "fresh explicit approval" "skill requires fresh approval for 
 check_has "$SKILL" "not just the URL you" "skill requires full-traffic target checks"
 check_has "$SKILL" "cap is" "skill states the spending cap is required"
 check_has "$SKILL" "UNTRUSTED PROVIDER DATA" "skill treats provider text as data"
-check_has "$SKILL" "version: 1.3.5" "skill version is 1.3.5"
+check_has "$SKILL" "version: 1.3.6" "skill version is 1.3.6"
 
 check_has "$END" "X402SOCKS_ALLOWED_HOSTS" "client snippets require target allowlist"
 check_has "$END" "curl -q" "manual curl examples ignore ambient config"
 check_has "$END" "allowlisted set of account and usage fields" "status output is documented as allowlisted"
 check_has "$END" 'context.route("**/*")' "Playwright example intercepts all requests"
 check_has "$END" "max-redirs 0" "curl example refuses redirects"
-check_has "$END" "redirect=False" "Python example refuses redirects"
-check_has "$END" "maxRedirections: 0" "Node example refuses redirects"
+check_has "$END" '"curl", "eu-north1"' "Python example delegates redirects to the helper"
+check_has "$END" '["curl", "eu-north1", target]' "Node example delegates redirects to the helper"
 check_has "$END" "raw Chrome instance as an agent" "Chrome example warns it cannot enforce allowlist"
 check_has "$END" "to the exact origin" "helper payment origin pinning is documented"
 
@@ -94,11 +94,11 @@ else
   bad "a documented curl invocation does not start with curl -q"
 fi
 
-if grep -q '"version": "1.3.5"' "$ROOT/.claude-plugin/plugin.json" &&
-   grep -q '"version": "1.3.5"' "$ROOT/.claude-plugin/marketplace.json"; then
-  pass "plugin manifests are version 1.3.5"
+if grep -q '"version": "1.3.6"' "$ROOT/.claude-plugin/plugin.json" &&
+   grep -q '"version": "1.3.6"' "$ROOT/.claude-plugin/marketplace.json"; then
+  pass "plugin manifests are version 1.3.6"
 else
-  bad "plugin manifests are not version 1.3.5"
+  bad "plugin manifests are not version 1.3.6"
 fi
 
 if [ "$fail" = 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT" >&2; fi
