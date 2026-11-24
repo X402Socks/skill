@@ -7,7 +7,8 @@ Reference for buying x402socks access. Prices are illustrative - read
 ## 1. The challenge
 
 ```bash
-curl -i -X POST https://payments.x402socks.com/v1/access/time_6h \
+curl -q -i --proto '=https' --proto-redir '=https' \
+     -X POST https://payments.x402socks.com/v1/access/time_6h \
      -H 'content-type: application/json' -d '{}'
 ```
 
@@ -58,20 +59,26 @@ settles.
 ## 2. Approve the full terms before paying
 
 An approval is the whole authorization, not just the amount or a package name:
-scheme, network, asset, recipient, EIP-712 asset domain, and exact amount must
-all be pinned. The signer must be bound to the one requirement that matched.
+job, authorized target hosts, exact request URL, package ID, challenge
+`resource`, signer public address, scheme, network, asset, recipient, EIP-712
+asset domain, and exact amount must all be pinned. The signer must be bound to
+the one requirement that matched.
 
 Run `scripts/x402socks.sh quote <package_id>` first. Record its `network`,
-`asset`, `pay_to`, `asset_name`, `asset_version`, and `amount_atomic` as the
-approved terms (the template is `assets/purchase-approval.md`). Pass them to the
-purchase as values the user approved - never read them from the 402 you are about
-to sign.
+`asset`, `pay_to`, `asset_name`, `asset_version`, and `amount_atomic`, plus the
+live 402 `resource.url`, `resource.description`, and `serviceName`, as the
+approved terms. Use `assets/purchase-approval.md` and fill every blank from the
+user's decision. Pass those values to the purchase as values the user approved,
+never as literals copied from an example and never read from the 402 you are
+about to sign.
 
 Before signing, require **exactly one** entry in the live 402 `accepts[]` and
-compare every field against the approval. Abort if the list has more than one
+compare every field against the approval. Also require the request URL, package
+ID, `resource`, and signer address to match. Abort if the list has more than one
 entry, if any field differs, or if anything is ambiguous. Do not filter the list
 and pick the cheapest survivor; a challenge with an unapproved option is a
-failed challenge, not a menu.
+failed challenge, not a menu. One approval covers one signed authorization. A
+later 402 needs a fresh user decision, not another signature from the old one.
 
 ## 3. TypeScript
 
@@ -80,111 +87,176 @@ npm i @x402/fetch @x402/evm viem
 ```
 
 `@x402/fetch` exposes the hooks needed to enforce this before signing:
-`spendControls` caps value, `policies` reject a challenge that is not the
-approved one, and `paymentRequirementsSelector` only ever sees the approved
-requirement.
+`onPaymentRequired` sees the decoded challenge and the exact request URL,
+`spendControls` caps value, `policies` reject an unapproved requirement, and
+`paymentRequirementsSelector` only ever sees the approved requirement.
 
 ```ts
-import { wrapFetchWithPaymentFromConfig } from "@x402/fetch";
+import { readFile } from "node:fs/promises";
+import {
+  wrapFetchWithPayment,
+  x402Client,
+  x402HTTPClient,
+} from "@x402/fetch";
 import type {
+  Network,
   PaymentPolicy,
+  PaymentRequired,
   SelectPaymentRequirements,
 } from "@x402/fetch";
 import { ExactEvmScheme } from "@x402/evm";
+import type { Account } from "viem";
 
-// Copy these from the quote the user approved. Never derive them from the 402
-// that is about to be signed.
-const APPROVED = {
-  scheme: "exact",
-  network: process.env.X402_APPROVED_NETWORK ?? "",
-  asset: process.env.X402_APPROVED_ASSET ?? "",
-  payTo: process.env.X402_APPROVED_PAY_TO ?? "",
-  assetName: process.env.X402_APPROVED_ASSET_NAME ?? "",
-  assetVersion: process.env.X402_APPROVED_ASSET_VERSION ?? "",
-  amountAtomic: BigInt(process.env.X402_APPROVED_AMOUNT_ATOMIC ?? "0"),
+// The operator writes this private file from assets/purchase-approval.md after
+// the user approves. No sample values and no URLs live in this code.
+type Approved = {
+  job: string;
+  authorizedTargets: string[];
+  requestUrl: string;
+  packageId: string;
+  resourceUrl: string;
+  resourceDescription: string;
+  serviceName: string;
+  scheme: string;
+  network: string;
+  asset: string;
+  payTo: string;
+  assetName: string;
+  assetVersion: string;
+  amountAtomic: string;
+  signerAddress: string;
+  approvedBy: string;
+  approvedAt: string;
 };
 
-if (
-  !APPROVED.network ||
-  !APPROVED.asset ||
-  !APPROVED.payTo ||
-  !APPROVED.assetName ||
-  !APPROVED.assetVersion ||
-  APPROVED.amountAtomic <= 0n
-) {
-  throw new Error("missing approved terms; run `quote` and record its output");
+const approvalPath = process.env.X402_APPROVAL_FILE;
+if (!approvalPath) throw new Error("X402_APPROVAL_FILE is required");
+const APPROVED = JSON.parse(await readFile(approvalPath, "utf8")) as Approved;
+
+const textFields = [
+  "job", "requestUrl", "packageId", "resourceUrl", "resourceDescription",
+  "serviceName", "scheme", "network", "asset", "payTo", "assetName",
+  "assetVersion", "amountAtomic", "signerAddress", "approvedBy", "approvedAt",
+] as const;
+for (const key of textFields) {
+  const value = APPROVED[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`approval is missing ${key}; ask the user again`);
+  }
+}
+if (!Array.isArray(APPROVED.authorizedTargets) || APPROVED.authorizedTargets.length === 0) {
+  throw new Error("approval has no authorized target hosts; ask the user again");
+}
+if (!/^\d+$/.test(APPROVED.amountAtomic) || APPROVED.amountAtomic === "0") {
+  throw new Error("approved amount must be a positive integer in atomic USDC");
 }
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-
-// Require exactly one advertised option and require it to equal the approval
-// field for field, including the exact amount. More than one option, an exact
-// amount mismatch, or any difference is a failed challenge, not a menu.
-const pinApprovedTerms: PaymentPolicy = (_version, options) => {
-  if (options.length !== 1) {
-    throw new Error(
-      `402 advertised ${options.length} payment options; approval covers exactly one`,
-    );
-  }
-  const option = options[0];
+const optionMatches = (option: {
+  scheme: string;
+  network: string;
+  asset: string;
+  payTo: string;
+  amount: string;
+  extra?: Record<string, unknown>;
+}) => {
   const extra = (option.extra ?? {}) as { name?: string; version?: string };
-  const matches =
+  return (
     option.scheme === APPROVED.scheme &&
     option.network === APPROVED.network &&
     same(option.asset, APPROVED.asset) &&
     same(option.payTo, APPROVED.payTo) &&
     extra.name === APPROVED.assetName &&
     extra.version === APPROVED.assetVersion &&
-    BigInt(option.amount) === APPROVED.amountAtomic;
-  if (!matches) {
-    throw new Error(
-      "402 challenge differs from the approved scheme/network/asset/payTo/domain/amount",
-    );
-  }
-  return [option];
+    BigInt(option.amount) === BigInt(APPROVED.amountAtomic)
+  );
 };
 
-// The selector can only ever return the one requirement the policy approved.
-const selectApproved: SelectPaymentRequirements = (_version, options) => {
-  if (options.length !== 1) {
-    throw new Error("expected exactly one approved payment option");
+// This guard receives the challenge and the actual request URL, so a copied
+// client cannot use a fixed purchase URL or a different package.
+function assertApprovedChallenge(challenge: PaymentRequired, requestUrl: string) {
+  if (requestUrl !== APPROVED.requestUrl) {
+    throw new Error("request URL is not the approved purchase URL");
   }
+  const parsed = new URL(requestUrl);
+  if (!parsed.pathname.endsWith(`/v1/access/${APPROVED.packageId}`)) {
+    throw new Error("request URL is not the approved package");
+  }
+  if (challenge.x402Version !== 2) throw new Error("unexpected x402 version");
+  if (challenge.resource.url !== APPROVED.resourceUrl) {
+    throw new Error("challenge resource URL is not approved");
+  }
+  if ((challenge.resource.description ?? "") !== APPROVED.resourceDescription) {
+    throw new Error("challenge entitlements are not approved");
+  }
+  if ((challenge.resource.serviceName ?? "") !== APPROVED.serviceName) {
+    throw new Error("challenge service is not approved");
+  }
+  const options = challenge.accepts ?? [];
+  if (options.length !== 1) {
+    throw new Error(`402 advertised ${options.length} options; approval covers exactly one`);
+  }
+  if (!optionMatches(options[0])) {
+    throw new Error("402 challenge differs from the approved terms");
+  }
+}
+
+const pinApprovedTerms: PaymentPolicy = (_version, options) => {
+  if (options.length !== 1) throw new Error("expected exactly one approved option");
+  if (!optionMatches(options[0])) throw new Error("402 differs from the approved terms");
+  return [options[0]];
+};
+
+const selectApproved: SelectPaymentRequirements = (_version, options) => {
+  if (options.length !== 1) throw new Error("expected exactly one approved option");
   return options[0];
 };
-
-import type { Account } from "viem";
 
 // The host supplies a non-exportable signer (keystore, hardware wallet, or
 // KMS/HSM). This skill never reads or prints a raw key; see wallet.md.
 declare function loadHostSigner(): Promise<Account>;
-
 const account = await loadHostSigner();
+if (!same(account.address, APPROVED.signerAddress)) {
+  throw new Error("signer is not the approved paying wallet");
+}
 
-const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, {
-  schemes: [{ network: APPROVED.network, client: new ExactEvmScheme(account) }],
-  // Second layer: the library enforces the exact cap before policies and signing.
-  spendControls: {
-    maxAmountPerPayment: Number(APPROVED.amountAtomic) / 1_000_000,
+const client = new x402Client(selectApproved)
+  .register(APPROVED.network as Network, new ExactEvmScheme(account))
+  .registerPolicy(pinApprovedTerms)
+  .setSpendControls({
+    allowedAssets: [{
+      network: APPROVED.network as Network,
+      asset: APPROVED.asset,
+      maxAmountPerPayment: APPROVED.amountAtomic,
+    }],
+  });
+
+const httpClient = new x402HTTPClient(client).onPaymentRequired(
+  async ({ paymentRequired, requestUrl }) => {
+    assertApprovedChallenge(paymentRequired, requestUrl);
   },
-  policies: [pinApprovedTerms],
-  paymentRequirementsSelector: selectApproved,
-});
-
-const res = await fetchWithPayment(
-  "https://payments.x402socks.com/v1/access/time_6h",
-  { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
 );
 
+const fetchWithPayment = wrapFetchWithPayment(fetch, httpClient);
+const res = await fetchWithPayment(APPROVED.requestUrl, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: "{}",
+});
 if (!res.ok) throw new Error(`purchase failed: ${res.status}`);
 
-const { account: acct, token } = await res.json();
-console.log("settlement:", res.headers.get("PAYMENT-RESPONSE"));
+const data = (await res.json()) as { token?: string };
+if (typeof data.token !== "string") throw new Error("purchase response had no token");
+// Pass data.token to your 0600 token store. Never log it or the raw response.
+// Keep PAYMENT-RESPONSE locally if recovery needs the tx hash.
 ```
 
 The wrapper handles the request loop: first request, 402 parse, authorization
-signing, retry with `PAYMENT-SIGNATURE`. The policy runs on the challenge that is
-actually about to be paid, so a price, asset, or recipient change between quote
-and purchase aborts instead of signing.
+signing, retry with `PAYMENT-SIGNATURE`. The `onPaymentRequired` hook and policy
+run on the challenge that is actually about to be paid, so a URL, package,
+entitlement, signer, price, asset, or recipient change aborts instead of
+signing. The one protocol retry that sends this signed authorization is part of
+the approved purchase. A later 402 is a new decision and needs fresh approval.
 
 ## 4. Python
 
@@ -192,52 +264,79 @@ and purchase aborts instead of signing.
 uv add "x402[httpx,evm]"
 ```
 
-Read the live challenge before any signer exists, using the same approved terms:
+Read the live challenge before any signer exists, using the same approved terms.
+The approval file is written from `assets/purchase-approval.md` after the user
+decides. This example contains no payment literals and never creates that file:
 
 ```python
-import base64, json
+import base64, json, os
 import httpx
 
-# Copy these from the approved quote. Do not take them from this 402.
-APPROVED = {
-    "scheme": "exact",
-    "network": "eip155:8453",
-    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    "payTo": "0x73BAE3c48d34d71C4CEa76DFdaa3bE2cF4d335a1",
-    "assetName": "USD Coin",
-    "assetVersion": "2",
-    "amount_atomic": 1_000_000,
-}
+path = os.environ.get("X402_APPROVAL_FILE")
+if not path:
+    raise SystemExit("X402_APPROVAL_FILE is required")
+with open(path, encoding="utf-8") as fh:
+    approved = json.load(fh)
 
-def approved(req):
-    return (
-        req.get("scheme") == APPROVED["scheme"]
-        and req.get("network") == APPROVED["network"]
-        and req.get("asset", "").lower() == APPROVED["asset"].lower()
-        and req.get("payTo", "").lower() == APPROVED["payTo"].lower()
-        and req.get("extra", {}).get("name") == APPROVED["assetName"]
-        and req.get("extra", {}).get("version") == APPROVED["assetVersion"]
-        and int(req.get("amount", "0")) == APPROVED["amount_atomic"]
-    )
+required = (
+    "job", "request_url", "package_id", "resource_url",
+    "resource_description", "service_name", "scheme", "network", "asset",
+    "pay_to", "asset_name", "asset_version", "amount_atomic",
+    "signer_address", "approved_by", "approved_at",
+)
+for key in required:
+    value = approved.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit("approval is missing %s; ask the user again" % key)
+if not approved.get("authorized_targets"):
+    raise SystemExit("approval has no authorized target hosts; ask the user again")
+if not approved["amount_atomic"].isdecimal() or int(approved["amount_atomic"]) <= 0:
+    raise SystemExit("approved amount must be a positive integer in atomic USDC")
+signer = os.environ.get("X402_SIGNER_ADDRESS", "").lower()
+if signer != approved["signer_address"].lower():
+    raise SystemExit("signer is not the approved paying wallet")
 
-r = httpx.post("https://payments.x402socks.com/v1/access/time_6h", json={})
-assert r.status_code == 402, r.status_code
+r = httpx.post(approved["request_url"], json={})
+if r.status_code != 402:
+    raise SystemExit("expected 402, got %s" % r.status_code)
 
 raw = r.headers["payment-required"]
 raw += "=" * (-len(raw) % 4)          # base64url may omit padding
 challenge = json.loads(base64.urlsafe_b64decode(raw))
 options = challenge.get("accepts", [])
 
-# Require exactly one option and require it to equal the approval exactly.
-if len(options) != 1 or not approved(options[0]):
-    raise SystemExit("refusing: the 402 is not exactly the approved terms")
+if challenge.get("x402Version") != 2:
+    raise SystemExit("refusing: unexpected x402 version")
+resource = challenge.get("resource") or {}
+if resource.get("url") != approved["resource_url"]:
+    raise SystemExit("refusing: resource URL is not approved")
+if (resource.get("description") or "") != approved["resource_description"]:
+    raise SystemExit("refusing: entitlements are not approved")
+if (resource.get("serviceName") or "") != approved["service_name"]:
+    raise SystemExit("refusing: service is not approved")
+if len(options) != 1:
+    raise SystemExit("refusing: the 402 is not exactly one approved option")
+
 req = options[0]
+extra = req.get("extra") or {}
+if not (
+    req.get("scheme") == approved["scheme"]
+    and req.get("network") == approved["network"]
+    and req.get("asset", "").lower() == approved["asset"].lower()
+    and req.get("payTo", "").lower() == approved["pay_to"].lower()
+    and extra.get("name") == approved["asset_name"]
+    and extra.get("version") == approved["asset_version"]
+    and str(req.get("amount", "")).isdecimal()
+    and int(req["amount"]) == int(approved["amount_atomic"])
+):
+    raise SystemExit("refusing: the 402 is not exactly the approved terms")
 ```
 
 The preflight alone does not close the race: the retry can carry a different
-challenge. Apply the same check in the client's policy/selector hook. If it has
-no hook, do not let it auto-pay - read the 402 yourself and sign exactly the
-requirement you validated.
+challenge. Apply the same check in the client's policy or selector hook. If it
+has no hook, do not let it auto-pay, read the 402 yourself and sign exactly the
+requirement you validated. Do not re-sign a later 402 from this approval; stop
+and ask for a new decision.
 
 Pin the network to `eip155:8453` rather than a wildcard like `eip155:*`. A
 wildcard lets the client auto-pay on whatever chain a server advertises, which is

@@ -112,11 +112,16 @@ umask 077
 payload="$(mktemp)"; trap 'rm -f "$payload"' EXIT
 python3 -c 'import json,sys; print(json.dumps({"token": open(sys.argv[1]).read().strip()}))' \
   "$HOME/.config/x402socks/token" > "$payload"
-curl -sS -X POST https://x402socks.com/api/token/status \
+curl -q -sS --proto '=https' --proto-redir '=https' \
+  -X POST https://x402socks.com/api/token/status \
   -H 'content-type: application/json' --data-binary "@$payload"
 ```
 
-The body field is `token`. An `Authorization: Bearer` header alone returns `400 invalid_request`, so send the JSON body.
+`curl -q` ignores any ambient curl config, and the proto pins prevent a
+redirect from downgrading the credential-bearing request. The body field is
+`token`. An `Authorization: Bearer` header alone returns `400 invalid_request`,
+so send the JSON body. Prefer `scripts/x402socks.sh status`, which prints only
+an allowlisted set of account and usage fields.
 
 Success returns the account and usage. Failure:
 
@@ -157,8 +162,11 @@ Note the two error envelopes: the web API returns a flat `{"error":"code","code"
 
 Before signing, compare every `accepts[]` entry against the terms you got
 approved: `scheme`, `network`, `asset`, `payTo`, `extra.name`,
-`extra.version`, and `amount`. Reject the payment if any advertised option
-falls outside the approval or if the list is ambiguous. See `payments.md`.
+`extra.version`, and `amount`. Also require the exact request URL, package ID,
+challenge `resource`, and signer public address to match the approval. Reject
+the payment if any advertised option falls outside the approval, if the list is
+ambiguous, or if a later 402 appears after a signed authorization. See
+`payments.md`.
 
 ### `POST https://payments.x402socks.com/v1/access/recover`
 
@@ -167,7 +175,11 @@ See `payments.md`. Not listed in `openapi.json` because it is not payable.
 ## Client snippets
 
 All snippets read the token from the `0600` file and use **TLS CONNECT**. None of
-them puts the token in a command argument.
+them puts the token in a command argument. Each snippet also requires an explicit
+target allowlist in `X402SOCKS_ALLOWED_HOSTS` and refuses an empty list or a
+non-HTTPS target. A proxy changes the source IP, not permission to access a site.
+Obey the destination's access rules and do not use rotating egress to evade a
+block, rate limit, or access decision.
 
 ### curl (TLS CONNECT, recommended)
 
@@ -179,25 +191,41 @@ cfg="$(mktemp)"; trap 'rm -f "$cfg"' EXIT
   printf 'proxy-user = "%s:%s"\n' \
     "$(cat ~/.config/x402socks/token)" "$(cat ~/.config/x402socks/token)"
 } > "$cfg"
-curl --config "$cfg" https://api.ipify.org
+target="${X402SOCKS_TARGET_URL:-}"
+python3 -c 'import os,sys
+u = sys.argv[1]
+allowed = [h.strip().lower() for h in os.environ.get("X402SOCKS_ALLOWED_HOSTS","").split(",") if h.strip()]
+if not u.startswith("https://") or not allowed or u.split("/")[2].lower() not in allowed:
+    sys.exit("target is not in X402SOCKS_ALLOWED_HOSTS")' "$target"
+curl -q --proto '=https' --proto-redir '=https' --config "$cfg" "$target"
 ```
 
-`curl` verifies the exit certificate by default. If that check fails, the exit
-is not usable — do not disable verification or fall back to plaintext.
+`curl -q` ignores ambient curl config, so a local `~/.curlrc` cannot add an
+output or tracing option that exposes the proxy credentials. The proto pins
+block plaintext redirects. `curl` verifies the exit certificate by default. If
+that check fails, the exit is not usable, do not disable verification or fall
+back to plaintext.
 
 ### Python (urllib3, TLS CONNECT) — token sent via `Proxy-Authorization`, never in a URL
 
 ```python
 import os, base64, urllib3
+from urllib.parse import urlparse
 
 token = open(os.path.expanduser("~/.config/x402socks/token")).read().strip()
 auth = base64.b64encode(f"{token}:{token}".encode()).decode()
+
+target = os.environ.get("X402SOCKS_TARGET_URL", "")
+allowed = {h.strip().lower() for h in os.environ.get("X402SOCKS_ALLOWED_HOSTS", "").split(",") if h.strip()}
+u = urlparse(target)
+if u.scheme != "https" or not allowed or (u.hostname or "").lower() not in allowed:
+    raise SystemExit("target is not in X402SOCKS_ALLOWED_HOSTS")
 
 http = urllib3.ProxyManager(
     "https://eu-north1.x402socks.com:3129",
     proxy_headers={"Proxy-Authorization": f"Basic {auth}"},
 )
-print(http.request("GET", "https://api.ipify.org").data.decode())
+print(http.request("GET", target).data.decode())
 ```
 
 This needs `urllib3` 2.0+, which supports an HTTPS proxy. The token is put in a
@@ -214,13 +242,20 @@ import { homedir } from "node:os";
 import { ProxyAgent, request } from "undici";
 
 const t = readFileSync(`${homedir()}/.config/x402socks/token`, "utf8").trim();
+const target = process.env.X402SOCKS_TARGET_URL ?? "";
+const allowed = (process.env.X402SOCKS_ALLOWED_HOSTS ?? "")
+  .split(",").map(h => h.trim().toLowerCase()).filter(Boolean);
+const parsed = new URL(target);
+if (parsed.protocol !== "https:" || !allowed.includes(parsed.hostname)) {
+  throw new Error("target is not in X402SOCKS_ALLOWED_HOSTS");
+}
 const dispatcher = new ProxyAgent({
   // TLS listener: the token is not sent in cleartext on this hop.
   uri: "https://eu-north1.x402socks.com:3129",
   token: `Basic ${Buffer.from(`${t}:${t}`).toString("base64")}`,
 });
 
-const { body } = await request("https://api.ipify.org", { dispatcher });
+const { body } = await request(target, { dispatcher });
 console.log(await body.text());
 ```
 
@@ -238,6 +273,13 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 const t = readFileSync(`${homedir()}/.config/x402socks/token`, "utf8").trim();
+const target = process.env.X402SOCKS_TARGET_URL ?? "";
+const allowed = (process.env.X402SOCKS_ALLOWED_HOSTS ?? "")
+  .split(",").map(h => h.trim().toLowerCase()).filter(Boolean);
+const parsed = new URL(target);
+if (parsed.protocol !== "https:" || !allowed.includes(parsed.hostname)) {
+  throw new Error("target is not in X402SOCKS_ALLOWED_HOSTS");
+}
 
 const browser = await chromium.launch({
   proxy: {
@@ -246,6 +288,8 @@ const browser = await chromium.launch({
     password: t,
   },
 });
+const page = await browser.newPage();
+await page.goto(target);
 ```
 
 ### Chrome
@@ -254,7 +298,7 @@ const browser = await chromium.launch({
 --proxy-server=https://eu-north1.x402socks.com:3129
 ```
 
-Chrome shows its own credential dialog after the first `407`. Enter the token as **both** username and password.
+Chrome shows its own credential dialog after the first `407`. Enter the token as **both** username and password. Chrome cannot enforce the target allowlist, so the operator must check `X402SOCKS_ALLOWED_HOSTS` and the destination's access rules before launching.
 
 ### Legacy plaintext transports (not used by this skill)
 

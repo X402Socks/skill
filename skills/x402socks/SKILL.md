@@ -1,18 +1,19 @@
 ---
 name: x402socks
-description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or a privacy-preserving fetch - for example "get a proxy", "route this through a proxy", "rotate my IP", "fetch from a specific region", "anonymous proxy for an agent", "pay for a proxy with USDC", "x402 proxy", or "x402socks". It buys pay-per-use anonymous proxy egress from x402socks.com over TLS HTTP CONNECT, paid in USDC on Base with the x402 protocol. Use it only for targets you are authorized to access.
+description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or privacy for an authorized fetch, for example "get a proxy", "route this through a proxy", "rotate my IP", "fetch from a specific region", "pay for proxy egress with USDC", "x402 proxy", or "x402socks". It buys pay-per-use proxy egress from x402socks.com over TLS HTTP CONNECT, paid in USDC on Base with the x402 protocol. Use it only for targets you are explicitly authorized to access and only within their access rules.
 license: MIT
 metadata:
   author: x402socks
-  version: 1.3.2
+  version: 1.3.3
   homepage: https://x402socks.com
 ---
 
 # x402socks proxy access
 
-Buy anonymous proxy egress for an agent, paid per job in USDC on Base through
+Buy private proxy egress for an agent, paid per job in USDC on Base through
 **x402** (HTTP 402). No signup, no email, no card. The payment returns a one-time
-proxy token; use it as **both** the proxy username and password.
+proxy token; use it as **both** the proxy username and password. The proxy only
+changes the network path, it does not grant permission to access a target.
 
 TLS HTTP CONNECT on port **3129** is the only transport this skill uses: the
 exit presents a valid certificate and curl verifies it. SOCKS5 (1080) and
@@ -62,20 +63,27 @@ scripts/x402socks.sh test eu-north1                 # TLS 3129, fails if IP unch
 ## Spending rule
 
 Buying spends real money. **Do not pay without explicit authorization for that
-exact amount.**
+exact package, request URL, entitlements, signer, and amount.**
 
 1. Read the live price from `/catalog.json` (or `quote <package_id>`).
-2. Tell the user the package, price, and entitlements.
-3. Wait for a clear yes.
+2. Tell the user the job, package ID, request URL, price, entitlements, and the
+   public address of the signing wallet.
+3. Wait for a clear yes. Record it with the full term set in
+   `assets/purchase-approval.md`.
 4. Before signing, require **exactly one** live 402 `accepts[]` option and
    compare every field to the approved terms: `scheme`, `network`, `asset`,
-   `payTo`, `extra.name`, `extra.version`, and `amount`. Abort if the list has
-   more than one option, if any option differs, or if anything is ambiguous.
+   `payTo`, `extra.name`, `extra.version`, and `amount`. Also require the live
+   challenge `resource.url` and `resource.description` to match the approved
+   package and entitlements, and require the request URL and signer address to
+   match. Abort if the list has more than one option, if any field differs, or
+   if anything is ambiguous.
 
-An approval is the exact amount and terms, not a package name.
-`scripts/x402socks.sh quote <package_id>` prints the live terms and exits
-non-zero above `X402SOCKS_MAX_USDC`. Start with `time_6h` ($1.00, 6 hours, 1 GB)
-unless the job clearly needs more; re-read `/catalog.json` for current packages.
+An approval is one authorization for one job, package, request URL, signer, and
+exact term set. It is not a reusable budget. `scripts/x402socks.sh quote
+<package_id>` prints the live terms and exits non-zero unless the live 402 says
+HTTP 402 with exactly one option and an atomic amount within
+`X402SOCKS_MAX_USDC`. Start with `time_6h` ($1.00, 6 hours, 1 GB) unless the job
+clearly needs more; re-read `/catalog.json` for current packages.
 
 ## Steps
 
@@ -84,15 +92,22 @@ unless the job clearly needs more; re-read `/catalog.json` for current packages.
 2. **Quote and approve.** Run `quote <package_id>`, show the user, wait.
 3. **Request access.** `POST https://payments.x402socks.com/v1/access/{package_id}`
    with `{}`. Expect `402` and a base64 `PAYMENT-REQUIRED` header.
-4. **Pay.** Validate the live `accepts[]` against the approval, sign an x402 v2
-   EIP-3009 authorization, and retry the same URL with `PAYMENT-SIGNATURE`.
+4. **Pay.** Validate the live `accepts[]`, `resource`, request URL, package ID,
+   and signer against the approval, sign one x402 v2 EIP-3009 authorization,
+   and retry the same URL with `PAYMENT-SIGNATURE`. The protocol retry that sends
+   this signed authorization is part of the one approved purchase.
 5. **Save the token.** It is returned once as
-   `{"account":{...},"token":"..."}`. Write it to a `0600` file; never print it.
-6. **Route and prove.** Use TLS CONNECT on 3129 with the token as both username
-   and password. `scripts/x402socks.sh test <exit>` fetches a direct baseline,
-   forces the proxy, and fails if the egress IP did not change.
+   `{"account":{...},"token":"..."}`. Use `scripts/x402socks.sh save-token` or
+   the helper's rotate and recover commands; they write the `0600` file and
+   print only an allowlisted, redacted summary. Never print raw JSON.
+6. **Route and prove.** Check the target against an explicit allowlist first.
+   Then use TLS CONNECT on 3129 with the token as both username and password.
+   `scripts/x402socks.sh test <exit>` fetches a direct baseline, forces the
+   proxy, and fails if the egress IP did not change.
 7. **If it fails.** Run `status` (or `validate`) before debugging the target. A
-   dead token and a dead exit look identical.
+   dead token and a dead exit look identical. If a fresh 402 appears after a
+   signed authorization, stop and get fresh explicit approval; never re-sign from
+   the old approval.
 
 ## Using the token
 
@@ -101,6 +116,7 @@ unless the job clearly needs more; re-read `/catalog.json` for current packages.
 scripts/x402socks.sh test eu-north1
 
 # curl: put the proxy credentials in a 0600 config file, not argv
+# -q ignores ambient curl config; HTTPS proto pins block plaintext redirects.
 umask 077
 cfg="$(mktemp)"; trap 'rm -f "$cfg"' EXIT
 tok="$(tr -d '\r\n' < ~/.config/x402socks/token)"
@@ -108,13 +124,28 @@ tok="$(tr -d '\r\n' < ~/.config/x402socks/token)"
   printf 'proxy = "https://eu-north1.x402socks.com:3129"\n'
   printf 'proxy-user = "%s:%s"\n' "$tok" "$tok"
 } > "$cfg"
-curl --config "$cfg" https://api.ipify.org
+target="${X402SOCKS_TARGET_URL:-}"
+python3 -c 'import os,sys
+u = sys.argv[1]
+allowed = [h.strip().lower() for h in os.environ.get("X402SOCKS_ALLOWED_HOSTS","").split(",") if h.strip()]
+if not u.startswith("https://") or not allowed or u.split("/")[2].lower() not in allowed:
+    sys.exit("target is not in X402SOCKS_ALLOWED_HOSTS")' "$target"
+curl -q --proto '=https' --proto-redir '=https' --config "$cfg" "$target"
 ```
 
 The helper uses TLS CONNECT only. SOCKS5 (1080) and plaintext CONNECT (3128)
 exist for legacy browser clients, but they send the reusable token without
 encryption; do not use them for an agent purchase. Python, Node, Playwright, and
 Chrome examples are in `references/endpoints.md`.
+
+## Target authorization (hard)
+
+A proxy changes the source IP, not the permission to access a destination. Set
+`X402SOCKS_ALLOWED_HOSTS` to the exact hostnames you are authorized to use for
+this job, and keep `X402SOCKS_TARGET_URL` inside that list. Refuse a target when
+the allowlist is empty, when the scheme is not HTTPS, or when a site's access
+rules prohibit automated access. Do not use rotating egress to evade a block,
+rate limit, or access decision.
 
 ## Credential rules (hard)
 

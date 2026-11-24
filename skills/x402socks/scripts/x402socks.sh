@@ -112,6 +112,46 @@ pretty() {
   fi
 }
 
+# Credential-bearing responses are printed as an allowlist, not verbatim. Any
+# field that is not named here stays inside the helper and never reaches a
+# terminal, transcript, or calling agent.
+allowlisted_status() {
+  python3 -c '
+import json, sys
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit("status response was not valid JSON")
+if not isinstance(data, dict):
+    sys.exit("unexpected status response shape")
+
+def scalar(value):
+    return value is None or isinstance(value, (str, int, float, bool))
+
+out = {}
+for key in ("status", "valid", "active", "expires_at"):
+    if key in data and scalar(data[key]):
+        out[key] = data[key]
+
+groups = {
+    "usage": ("bytes_used", "bytes_allowed", "quota_bytes", "used_bytes",
+              "connections", "active_connections", "connection_count",
+              "last_seen_at"),
+}
+for parent, keys in groups.items():
+    value = data.get(parent)
+    if not isinstance(value, dict):
+        continue
+    picked = {k: value[k] for k in keys if k in value and scalar(value[k])}
+    if picked:
+        out[parent] = picked
+
+json.dump(out, sys.stdout, indent=2)
+sys.stdout.write("\n")
+'
+}
+
 token_file() {
   printf '%s' "${X402SOCKS_TOKEN_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/x402socks/token}"
 }
@@ -211,26 +251,46 @@ json_token_body() {
   python3 -c 'import json, sys; print(json.dumps({"token": sys.stdin.read()}))'
 }
 
-# Read a token only from a private regular file. A symlink, a group/world
-# readable file, or a file owned by another user is refused before the bytes
-# are used.
+# Read a token only from a private regular file. Validation and the read use the
+# same open file descriptor, so another process cannot swap the path between a
+# check and a second open. A symlink, a FIFO, a group/world readable file, or a
+# file owned by another user is refused before any bytes are used.
 read_token_file() {
   python3 - "$1" <<'PY'
-import os, sys
-path = sys.argv[1]
+import os, stat, sys
+path = os.path.abspath(sys.argv[1])
+directory = os.path.dirname(path) or "."
+name = os.path.basename(path)
+dir_fd = None
+fd = None
 try:
-    st = os.lstat(path)
-except OSError as exc:
-    sys.exit("cannot read token file: %s" % exc)
-if os.path.islink(path) or not os.path.isfile(path):
-    sys.exit("token file is not a regular file: %s" % path)
-if st.st_uid != os.getuid():
-    sys.exit("token file is not owned by the current user: %s" % path)
-if st.st_mode & 0o077:
-    sys.exit("token file is accessible to group/other (mode %o): %s"
-             % (st.st_mode & 0o777, path))
-with open(path, "r", encoding="utf-8") as fh:
-    sys.stdout.write(fh.read().replace("\r", "").replace("\n", ""))
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        sys.exit("token directory is not a real directory: %s" % directory)
+    dst = os.fstat(dir_fd)
+    if dst.st_uid != os.getuid() or (dst.st_mode & 0o022):
+        sys.exit("token directory is not private to the current user: %s" % directory)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        sys.exit("token file is not a regular file: %s" % path)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit("token file is not a regular file: %s" % path)
+    if st.st_uid != os.getuid():
+        sys.exit("token file is not owned by the current user: %s" % path)
+    if st.st_mode & 0o077:
+        sys.exit("token file is accessible to group/other (mode %o): %s"
+                 % (st.st_mode & 0o777, path))
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        fd = None
+        sys.stdout.write(fh.read().replace("\r", "").replace("\n", ""))
+finally:
+    if fd is not None:
+        os.close(fd)
+    if dir_fd is not None:
+        os.close(dir_fd)
 PY
 }
 
@@ -364,8 +424,13 @@ else:
             except OSError:
                 pass
 
-data["token"] = "<redacted: saved to %s (mode 600)>" % path
-json.dump(data, sys.stdout, indent=2)
+# Output allowlist: never echo the provider response, account details, or any
+# field that was not explicitly reviewed. The only confirmation is the redacted
+# token marker and the private path where the replacement was saved.
+json.dump({
+    "token": "<redacted: saved to %s (mode 600)>" % path,
+    "saved_to": path,
+}, sys.stdout, indent=2)
 sys.stdout.write("\n")
 ' "$file"
 }
@@ -378,7 +443,8 @@ x402socks helper
   nodes [--available]           exit points, optionally only usable ones
   catalog [--summary]           package catalog with prices
   price <package_id>            one package's price and entitlements
-  quote <package_id>            live 402 amount; enforces X402SOCKS_MAX_USDC
+  quote <package_id>            live 402 terms; requires HTTP 402, one option,
+                                and an atomic amount within X402SOCKS_MAX_USDC
   save-token                    read a token from stdin and store it (mode 600)
   status                        account status and usage
   validate                      cheap token check (exit 0 = valid)
@@ -394,7 +460,9 @@ Token source (never argv):
   Run 'save-token' once to create the file.
 
 Budget guard:
-  X402SOCKS_MAX_USDC    approved maximum in USD; 'quote' fails above it
+  X402SOCKS_MAX_USDC    approved maximum in USD, max 6 decimals; 'quote' fails
+                        on a non-finite value, a non-402 reply, mixed options,
+                        or an atomic amount above the cap
   X402SOCKS_TIMEOUT     per-request timeout in seconds (default 30)
 
 Endpoint overrides (advanced):
@@ -458,16 +526,27 @@ else:
 ' "$1"
 }
 
-# Print the live 402 amount and fail if it exceeds the approved cap. The
-# challenge, not the catalog, is what a payment would actually authorize.
-# Every accepts[] option is checked: a client may select any of them.
+# Print the live 402 terms and fail unless the reply really is a 402 with one
+# exact option inside the approved atomic cap. The challenge, not the catalog and
+# not a floating-point conversion, is what a payment would authorize.
 cmd_quote() {
-  local pkg="${1:-}" cap="${X402SOCKS_MAX_USDC:-}" hdr decoded
+  local pkg="${1:-}" cap="${X402SOCKS_MAX_USDC:-}" code hdr decoded tmpdir hdrfile
   [ -n "$pkg" ] || die "usage: quote <package_id>"
 
-  hdr="$(req -D - -o /dev/null -X POST "$PAY/v1/access/$pkg" \
-        -H 'content-type: application/json' -d '{}' \
-        | tr -d '\r' | awk 'tolower($1) == "payment-required:" { print $2; exit }')"
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/x402socks-quote.XXXXXX")"
+  hdrfile="$tmpdir/headers"
+  # Use a global for the EXIT trap; a function-local variable is out of scope
+  # by the time the trap runs.
+  QUOTE_TMPDIR="$tmpdir"
+  trap 'rm -rf "$QUOTE_TMPDIR"' EXIT
+
+  code="$(req -D "$hdrfile" -o /dev/null -w '%{http_code}' -X POST \
+          "$PAY/v1/access/$pkg" \
+          -H 'content-type: application/json' -d '{}')"
+  [ "$code" = "402" ] || die "expected HTTP 402 for '$pkg', got $code"
+
+  hdr="$(tr -d '\r' < "$hdrfile" |
+         awk 'tolower($1) == "payment-required:" { print $2; exit }')"
   [ -n "$hdr" ] || die "no PAYMENT-REQUIRED header for '$pkg'"
 
   decoded="$(printf '%s' "$hdr" | python3 -c '
@@ -479,41 +558,59 @@ try:
 except Exception:
     data = json.loads(base64.b64decode(raw))
 options = data.get("accepts") or []
-if not options:
-    sys.exit("402 has no accepts[] options")
-rows = [{
+if len(options) != 1:
+    sys.exit("402 must advertise exactly one accepts[] option, got %d" % len(options))
+a = options[0]
+if not isinstance(a, dict):
+    sys.exit("402 option is not an object")
+amount = a.get("amount")
+if not isinstance(amount, str) or not amount.isdecimal() or int(amount) <= 0:
+    sys.exit("402 amount is not a positive integer in atomic USDC")
+resource = data.get("resource") or {}
+if not isinstance(resource, dict):
+    sys.exit("402 resource is not an object")
+out = {
+    "package": sys.argv[1],
+    "request_url": sys.argv[2],
+    "resource_url": resource.get("url"),
+    "resource_description": resource.get("description"),
+    "service_name": resource.get("serviceName"),
     "scheme": a.get("scheme"),
     "network": a.get("network"),
-    "amount_atomic": a.get("amount"),
-    "amount_usd": int(a["amount"]) / 10**6,
+    "amount_atomic": amount,
+    "amount_usd": "%s.%06d" % (int(amount) // 10**6, int(amount) % 10**6),
     "asset": a.get("asset"),
     "pay_to": a.get("payTo"),
     "asset_name": (a.get("extra") or {}).get("name"),
     "asset_version": (a.get("extra") or {}).get("version"),
     "max_timeout_seconds": a.get("maxTimeoutSeconds"),
-} for a in options]
-out = {"package": sys.argv[1]}
-if len(rows) == 1:
-    out.update(rows[0])
-else:
-    out["options"] = rows
+}
 print(json.dumps(out, indent=2))
-' "$pkg")"
+' "$pkg" "$PAY/v1/access/$pkg")"
 
   printf '%s\n' "$decoded"
 
   if [ -n "$cap" ]; then
     printf '%s' "$decoded" | python3 -c '
 import json, sys
-cap = float(sys.argv[1])
+from decimal import Decimal, InvalidOperation
+try:
+    cap = Decimal(sys.argv[1])
+except InvalidOperation:
+    sys.exit("approved cap is not a decimal number")
+if not cap.is_finite() or cap < 0:
+    sys.exit("approved cap must be a finite, non-negative number")
+if cap.as_tuple().exponent < -6:
+    sys.exit("approved cap cannot have more than 6 decimal places")
+cap_atomic = int(cap * 10**6)
 data = json.load(sys.stdin)
-rows = data.get("options") or [data]
-over = [r for r in rows if r["amount_usd"] > cap]
-if over:
-    sys.exit("approved cap is $%.2f but an option asks $%.2f"
-             % (cap, max(r["amount_usd"] for r in over)))
-print("within approved cap ($%.2f; %d option%s)"
-      % (cap, len(rows), "" if len(rows) == 1 else "s"))
+amount_atomic = int(data["amount_atomic"])
+if amount_atomic <= 0:
+    sys.exit("402 amount is not a positive integer in atomic USDC")
+if amount_atomic > cap_atomic:
+    sys.exit("approved cap is $%s but the 402 asks $%s"
+             % (sys.argv[1], data["amount_usd"]))
+print("within approved cap ($%s; 1 option)" % sys.argv[1])
 ' "$cap"
   else
     note "no X402SOCKS_MAX_USDC set; re-check every amount above before approving"
@@ -540,7 +637,7 @@ cmd_status() {
   token="$(resolve_token)"
   body="$(printf '%s' "$token" | json_token_body)"
   cfg="$(printf 'header = "content-type: application/json"\ndata = "%s"' "$(cfg_escape "$body")")"
-  printf '%s' "$cfg" | req_secret "$WEB/api/token/status" -X POST | pretty
+  printf '%s' "$cfg" | req_secret "$WEB/api/token/status" -X POST | allowlisted_status
 }
 
 cmd_validate() {
