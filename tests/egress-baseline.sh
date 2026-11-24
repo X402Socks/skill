@@ -63,6 +63,16 @@ LAST_CALLS=0
 run_test() {
   rm -f "$FAKE_CURL_LOG"
   LAST_OUT="$(env FAKE_DIRECT_IP="$1" FAKE_PROXY_IP="$2" \
+    X402SOCKS_BASELINE_IP="$1" X402SOCKS_ALLOW_DIRECT_BASELINE=0 \
+    bash "$SKILL" test eu-north1 2>&1)"
+  LAST_RC=$?
+  LAST_CALLS="$(calls)"
+}
+
+run_consent_test() {
+  rm -f "$FAKE_CURL_LOG"
+  LAST_OUT="$(env FAKE_DIRECT_IP="$1" FAKE_PROXY_IP="$2" \
+    X402SOCKS_ALLOW_DIRECT_BASELINE=1 \
     bash "$SKILL" test eu-north1 2>&1)"
   LAST_RC=$?
   LAST_CALLS="$(calls)"
@@ -86,13 +96,22 @@ else
   bad "different IP (rc=$LAST_RC) output=$LAST_OUT"
 fi
 
-# 3. The probe ignores ambient curl config and forces both sides of the test.
+# 3. An operator baseline avoids a public IP lookup; only the proxy is forced.
 if grep -qF -- "-q " "$FAKE_CURL_LOG" &&
-   grep -qF -- "--noproxy *" "$FAKE_CURL_LOG" &&
-   grep -qF -- "--noproxy " "$FAKE_CURL_LOG"; then
-  pass "probe uses -q, a direct no-proxy baseline, and a forced proxy"
+   grep -qF -- "--noproxy " "$FAKE_CURL_LOG" &&
+   ! grep -qF -- "--noproxy *" "$FAKE_CURL_LOG" &&
+   contains "$LAST_OUT" "operator-provided direct egress baseline"; then
+  pass "operator baseline avoids the direct lookup and the probe forces the proxy"
 else
-  bad "probe argv=$(cat "$FAKE_CURL_LOG" 2>/dev/null)"
+  bad "operator-baseline argv=$(cat "$FAKE_CURL_LOG" 2>/dev/null) output=$LAST_OUT"
+fi
+
+# 4. Explicit consent still permits a direct public IP baseline.
+run_consent_test "203.0.113.10" "198.51.100.20"
+if [ "$LAST_RC" -eq 0 ] && grep -qF -- "--noproxy *" "$FAKE_CURL_LOG"; then
+  pass "explicit consent permits a direct no-proxy baseline"
+else
+  bad "consent baseline (rc=$LAST_RC) argv=$(cat "$FAKE_CURL_LOG" 2>/dev/null) output=$LAST_OUT"
 fi
 
 if [ "$fail" = 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT" >&2; fi

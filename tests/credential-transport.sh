@@ -86,7 +86,8 @@ for name in status validate rotate recover test; do
   STDIN_DATA=""; ALLOW_INSECURE=0; FAKE_RESPONSE='{}'
   run_named "$name" "http://127.0.0.1:9"
   if [ "$LAST_RC" -ne 0 ] && [ "$LAST_CALLS" -eq 0 ] &&
-     contains "$LAST_OUT" "must be an https:// URL"; then
+     { contains "$LAST_OUT" "must be an https:// URL" ||
+       contains "$LAST_OUT" "must use https://payments.x402socks.com"; }; then
     pass "$name refuses plaintext override before any request"
   else
     bad "$name plaintext refusal (rc=$LAST_RC calls=$LAST_CALLS) output=$LAST_OUT"

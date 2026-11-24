@@ -1,7 +1,7 @@
 {
   "name": "x402socks",
-  "description": "Buy and use anonymous proxy egress for agents (TLS HTTP CONNECT by default, SOCKS5 opt-in), paid per-job in USDC over x402.",
-  "version": "1.3.4",
+  "description": "Buy and use proxy egress for agents over TLS HTTP CONNECT, paid per job in USDC with x402.",
+  "version": "1.3.5",
   "author": {
     "name": "x402socks"
   },
@@ -10,7 +10,6 @@
   "keywords": [
     "x402",
     "proxy",
-    "socks5",
     "agents",
     "usdc",
     "base",

@@ -34,7 +34,7 @@ check_lacks() {
 
 check_has "$APPROVAL" "Exact request URL" "approval template binds request URL"
 check_has "$APPROVAL" "Expected \`resource.url\`" "approval template binds challenge resource"
-check_has "$APPROVAL" "Signer (keystore / hardware wallet; never a pasted key)" "approval template binds signer"
+check_has "$APPROVAL" "Actual signer object" "approval template binds signer"
 check_has "$APPROVAL" "Reconciliation, single use, and retries" "approval template covers reconciliation and reuse"
 check_has "$APPROVAL" ".consumed" "approval template requires exclusive consumption marker"
 check_has "$APPROVAL" "new explicit approval" "approval template requires fresh approval"
@@ -57,8 +57,8 @@ check_has "$SKILL" "X402SOCKS_ALLOWED_HOSTS" "skill requires an explicit target 
 check_has "$SKILL" "fresh explicit approval" "skill requires fresh approval for a later 402"
 check_has "$SKILL" "not just the URL you" "skill requires full-traffic target checks"
 check_has "$SKILL" "cap is" "skill states the spending cap is required"
-check_has "$SKILL" "Provider-controlled strings" "skill treats provider text as data"
-check_has "$SKILL" "version: 1.3.4" "skill version is 1.3.4"
+check_has "$SKILL" "UNTRUSTED PROVIDER DATA" "skill treats provider text as data"
+check_has "$SKILL" "version: 1.3.5" "skill version is 1.3.5"
 
 check_has "$END" "X402SOCKS_ALLOWED_HOSTS" "client snippets require target allowlist"
 check_has "$END" "curl -q" "manual curl examples ignore ambient config"
@@ -73,7 +73,7 @@ check_has "$END" "to the exact origin" "helper payment origin pinning is documen
 check_has "$PAY" "PAYMENT_ORIGIN" "TypeScript example pins the provider origin"
 check_has "$PAY" 'redirect: "error"' "TypeScript example rejects redirects"
 check_has "$PAY" ".consumed" "TypeScript example consumes the approval"
-check_has "$PAY" "hasValidToken" "TypeScript example reconciles an earlier payment"
+check_has "$PAY" "three-state reconciliation" "TypeScript example reconciles an earlier payment"
 check_has "$PAY" "follow_redirects=False" "Python example rejects redirects"
 check_has "$PAY" "assert_pinned_origin" "Python example pins the provider origin"
 
@@ -94,11 +94,11 @@ else
   bad "a documented curl invocation does not start with curl -q"
 fi
 
-if grep -q '"version": "1.3.4"' "$ROOT/.claude-plugin/plugin.json" &&
-   grep -q '"version": "1.3.4"' "$ROOT/.claude-plugin/marketplace.json"; then
-  pass "plugin manifests are version 1.3.4"
+if grep -q '"version": "1.3.5"' "$ROOT/.claude-plugin/plugin.json" &&
+   grep -q '"version": "1.3.5"' "$ROOT/.claude-plugin/marketplace.json"; then
+  pass "plugin manifests are version 1.3.5"
 else
-  bad "plugin manifests are not version 1.3.4"
+  bad "plugin manifests are not version 1.3.5"
 fi
 
 if [ "$fail" = 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT" >&2; fi

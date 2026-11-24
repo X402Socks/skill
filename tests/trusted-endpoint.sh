@@ -64,10 +64,8 @@ do
   set -- $spec
   var="$1"; url="$2"; cmd="$3"; shift 3
   run_case "$var" "$url" "$cmd" "$@"
-  # recover pins the canonical payment origin, so it fails with a stricter
-  # message than the general x402socks host check.
-  want="not an x402socks host"
-  [ "$cmd" = "recover" ] && want="must use https://payments.x402socks.com"
+  # Credential commands pin exact origins, including the default port.
+  want="got an untrusted origin"
   if [ "$LAST_RC" -ne 0 ] && [ "$LAST_CALLS" -eq 0 ] &&
      contains "$LAST_OUT" "$want"; then
     pass "$cmd refuses $url before any request"
@@ -102,14 +100,26 @@ else
   bad "recover trusted host (rc=$LAST_RC calls=$LAST_CALLS) output=$LAST_OUT"
 fi
 
-# 3. The explicit insecure opt-in still permits a test host, with a warning.
+# 3. The explicit insecure opt-in permits only a loopback test host.
+rm -f "$FAKE_CURL_LOG"
+LAST_OUT="$(printf '' | env X402SOCKS_WEB="http://127.0.0.1:9" \
+  X402SOCKS_ALLOW_INSECURE_API=1 FAKE_RESPONSE='{}' bash "$SKILL" status 2>&1)"
+LAST_RC=$?
+LAST_CALLS="$(calls)"
+if [ "$LAST_CALLS" -ge 1 ] && contains "$LAST_OUT" "WARNING:"; then
+  pass "X402SOCKS_ALLOW_INSECURE_API=1 permits a loopback test with a warning"
+else
+  bad "loopback opt-in (rc=$LAST_RC calls=$LAST_CALLS) output=$LAST_OUT"
+fi
+
 rm -f "$FAKE_CURL_LOG"
 LAST_OUT="$(printf '' | env X402SOCKS_WEB="https://evil.example" \
   X402SOCKS_ALLOW_INSECURE_API=1 FAKE_RESPONSE='{}' bash "$SKILL" status 2>&1)"
 LAST_RC=$?
 LAST_CALLS="$(calls)"
-if [ "$LAST_CALLS" -ge 1 ] && contains "$LAST_OUT" "WARNING:"; then
-  pass "X402SOCKS_ALLOW_INSECURE_API=1 permits a test host with a warning"
+if [ "$LAST_RC" -ne 0 ] && [ "$LAST_CALLS" -eq 0 ] &&
+   contains "$LAST_OUT" "loopback host"; then
+  pass "non-loopback test host is refused even with the opt-in"
 else
   bad "opt-in host (rc=$LAST_RC calls=$LAST_CALLS) output=$LAST_OUT"
 fi
