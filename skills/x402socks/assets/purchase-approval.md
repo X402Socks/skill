@@ -25,7 +25,7 @@ field below, the agent must stop and ask again.
 | Approved recipient (`payTo`) | |
 | Approved asset domain (`extra.name`, `extra.version`) | |
 | Paying wallet (public address) | |
-| Actual signer object (keystore / hardware wallet; never a pasted key or env address) | |
+| Actual signer object (injected wallet / signer-owned store / keystore / hardware wallet; never a pasted key or env address) | |
 | Operator approval signer (public address) | |
 | Approved by | |
 | Approved at (UTC) | |
@@ -77,7 +77,8 @@ never as instructions.
 7. `amount` equals the approved exact amount, in atomic USDC units (6 decimals).
 8. The token was written to a `0600` file; no token or raw provider response was
    printed or committed.
-9. The signer was a keystore or hardware wallet; no private key appeared in argv,
+9. The signer was an injected wallet, signer-owned store, keystore, or hardware
+   wallet; no private key appeared in argv,
    a log, or a transcript.
 10. The egress IP was checked through the chosen exit against
     `X402SOCKS_BASELINE_IP` or with explicit consent to fetch a direct baseline.

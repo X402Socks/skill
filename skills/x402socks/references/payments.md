@@ -1,7 +1,7 @@
 # x402 payment flow
 
 Reference for buying x402socks access. Prices are illustrative - read
-`/catalog.json` and the live 402 challenge. For the wallet and `cast` side, see
+`/catalog.json` and the live 402 challenge. For wallet and signer paths, see
 `wallet.md`.
 
 ## 1. The challenge
@@ -572,7 +572,7 @@ exactly the wrong behavior when an agent is spending unattended.
 
 ## 5. Manual signing sketch
 
-Only needed if you cannot use a library. `wallet.md` has the `cast` version.
+Only needed if you cannot use a library. `wallet.md` has an optional `cast` recipe.
 
 1. Build an EIP-3009 `TransferWithAuthorization` for `asset`, `payTo`, and
    `amount`.
@@ -661,5 +661,5 @@ that same timestamp.
 ## 8. No wallet = no purchase
 
 The x402 flow needs a signer with USDC on Base. If the agent has no wallet access,
-it cannot buy a package; there is no free tier. See `wallet.md` for the `cast`
-recipes and key-handling rules.
+it cannot buy a package; there is no free tier. See `wallet.md` for browser,
+signer-owned, and optional `cast` paths. Missing `cast` is not a blocker.

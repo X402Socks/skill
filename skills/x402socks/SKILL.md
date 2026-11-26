@@ -1,10 +1,10 @@
 ---
 name: x402socks
-description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or privacy for an authorized fetch, for example "get a proxy", "route this through a proxy", "rotate my IP", "fetch from a specific region", "pay for proxy egress with USDC", "x402 proxy", or "x402socks". It buys pay-per-use proxy egress from x402socks.com over TLS HTTP CONNECT, paid in USDC on Base with the x402 protocol. Use it only for targets you are explicitly authorized to access and only within their access rules.
+description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or privacy for an authorized fetch, for example "get a proxy", "route this through a proxy", "rotate my IP", "fetch from a specific region", "pay for proxy egress with USDC", "x402 proxy", or "x402socks". It buys pay-per-use proxy egress from x402socks.com over SOCKS5 with HTTP CONNECT fallbacks, paid in USDC on Base with the x402 protocol. Use it only for targets you are explicitly authorized to access and only within their access rules.
 license: MIT
 metadata:
   author: x402socks
-  version: 1.3.6
+  version: 1.4.0
   homepage: https://x402socks.com
 ---
 
@@ -15,11 +15,14 @@ Buy private proxy egress for an agent, paid per job in USDC on Base through
 proxy token; use it as **both** the proxy username and password. The proxy only
 changes the network path, it does not grant permission to access a target.
 
-TLS HTTP CONNECT on port **3129** is the only transport this skill uses: the
-exit presents a valid certificate and curl verifies it. SOCKS5 (1080) and
-plaintext HTTP CONNECT (3128) exist for legacy browser clients; they send the
-reusable token without encryption, so this skill does not use them and the
-helper does not expose them.
+Transport order is fixed: SOCKS5 on **1080** first, TLS HTTP CONNECT on **3129**
+second, plaintext HTTP CONNECT on **3128** last. CONNECT listeners are
+compatibility hops and may not exist on every exit; a failure moves to the next
+hop and never to a direct connection. Target HTTPS certificate verification stays
+on for every hop. Only after all three fail may an operator explicitly set
+`X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` to retry the TLS CONNECT hop without
+verifying the proxy certificate. That opt-in is proxy-only, warned, and never
+affects provider API requests or target TLS verification.
 
 ## Before you start: wallet access (required)
 
@@ -27,27 +30,25 @@ The agent cannot buy anything without a wallet it can use.
 
 - **Wallet:** an EVM-compatible wallet funded with **USDC on Base**. The cheapest
   package is **$1.00** (6 hours, 1 GB). No ETH is needed for an x402 purchase:
-  the facilitator submits the EIP-3009 transfer. A manual `cast send` does need
-  ETH for gas.
-- **Signing access:** the agent needs non-interactive access to that wallet. Use
-  a Foundry encrypted keystore
-  (`cast wallet import <name> --interactive`, then
-  `--keystore <path> --password-file <0600 file>`), a hardware wallet, or a
-  signer configured in the x402 client. Do not paste a raw private key into
-  chat.
-- **Tools:** `cast` plus a free Base RPC for low-volume balance checks and manual
-  sends, for example `https://mainnet.base.org`,
-  `https://base-rpc.publicnode.com`, `https://1rpc.io/base`, or
-  `https://base.drpc.org`. USDC on Base is
+  the facilitator submits the EIP-3009 transfer. A manual on-chain send does
+  need ETH for gas.
+- **Signer:** prefer a browser wallet with an injected EIP-1193 signer, a
+  signer-owned store, or an x402 client signer. No extra install is required.
+  A Foundry encrypted keystore, hardware wallet, KMS, or HSM is also valid.
+  `cast` is optional and only used for manual recipes. Do not paste a raw
+  private key into chat.
+- **RPC:** a free Base RPC is optional for low-volume balance checks, for
+  example `https://mainnet.base.org`, `https://base-rpc.publicnode.com`,
+  `https://1rpc.io/base`, or `https://base.drpc.org`. USDC on Base is
   `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
 - **Never** print, echo, log, or pass the private key as a command argument. It
   must not appear in a terminal transcript, process list, log, or commit. Keep
-  keystores and password files at mode `0600`.
+  key material at mode `0600`.
 - **No wallet access = no purchase.** There is no free trial and no way to use
-  the wallet without a signer.
+  the wallet without a signer. Missing `cast` is not a blocker.
 
-`references/wallet.md` has the `cast` recipes for address, USDC balance, manual
-send, and EIP-712 signing.
+`references/wallet.md` covers browser-wallet and signer-owned paths. `cast`
+recipes are optional compatibility examples.
 
 ## Fast path
 
@@ -57,7 +58,7 @@ scripts/x402socks.sh nodes --available              # usable exits only
 X402SOCKS_MAX_USDC=1.00 scripts/x402socks.sh quote time_6h
 # pay with the x402 client (see references/payments.md), then:
 scripts/x402socks.sh save-token                     # paste token, Ctrl-D; mode 600
-scripts/x402socks.sh test eu-north1                 # TLS 3129, fails if IP unchanged
+scripts/x402socks.sh test eu-north1                 # reports the working transport
 ```
 
 ## Spending rule
@@ -86,7 +87,8 @@ and a SHA-256 `approval_hash` over the canonical record, then verify the
 operator's detached EIP-191 signature with
 `scripts/x402socks.sh verify-approval`. That command checks the hash, the pinned
 signer, and the read-only file permissions before it claims the ID with an
-exclusive `0600` marker. The claim is durable, not tied to the approval filename.
+exclusive `0600` marker. The bundled `scripts/eip191_verify.py` needs no extra install
+and no Foundry install. The claim is durable, not tied to the approval filename.
 If the agent can write the approval file, claims directory, or signer setting,
 the decision is not trustworthy and the agent must stop. Reconcile first with
 `scripts/x402socks.sh reconcile`: exit 0 means a valid token already exists and
@@ -117,16 +119,17 @@ unless the job clearly needs more; re-read `/catalog.json` for current packages.
    actual signer object, not an environment address, to `signer_address`.
    Validate the live `accepts[]`, `resource`,
    request URL, package ID, and signer against the approval, sign one x402 v2
-   EIP-3009 authorization, and retry the same URL with `PAYMENT-SIGNATURE`. The
-   protocol retry that sends this signed authorization is part of the one
-   approved purchase. A claimed approval is burned; it cannot be replayed after
-   a crash or a later invocation.
+   EIP-3009 authorization with the browser or host signer, and retry the same URL
+   with `PAYMENT-SIGNATURE`. The protocol retry that sends this signed
+   authorization is part of the one approved purchase. A claimed approval is
+   burned; it cannot be replayed after a crash or a later invocation.
 5. **Save the token.** It is returned once as
    `{"account":{...},"token":"..."}`. Use `scripts/x402socks.sh save-token` or
    the helper's rotate and recover commands; they write the `0600` file and
    print only an allowlisted, redacted summary. Never print raw JSON.
 6. **Route and prove.** Check the target against an explicit allowlist first.
-   Then use TLS CONNECT on 3129 with the token as both username and password.
+   Then let the helper select SOCKS5, TLS CONNECT, or plaintext CONNECT in that
+   order, with the token as both username and password.
    `scripts/x402socks.sh test <exit>` uses `X402SOCKS_BASELINE_IP` when you
    supply it. Without that value it refuses to fetch your public IP unless you
    explicitly set `X402SOCKS_ALLOW_DIRECT_BASELINE=1`. It forces the proxy and
@@ -139,22 +142,22 @@ unless the job clearly needs more; re-read `/catalog.json` for current packages.
 ## Using the token
 
 ```bash
-# Helper: TLS CONNECT only, token read from the 0600 file, never argv
+# Helper: SOCKS5 first, then TLS and plaintext CONNECT; token stays out of argv
 scripts/x402socks.sh check-exit eu-north1
 scripts/x402socks.sh test eu-north1
+scripts/x402socks.sh test eu-north1 --tls               # force one transport
 
 # One strict command. The helper validates the token and exit, clears ambient
-# proxy bypass variables, forces HTTPS with no redirects, and consumes the
-# credentials internally. Nothing secret reaches stdout or the transcript.
+# proxy bypass variables, forces HTTPS with no redirects, consumes the
+# credentials internally, and reports the transport that worked. Nothing secret
+# reaches stdout or the transcript.
 set -e
 X402SOCKS_ALLOWED_HOSTS=example.com:443 \
   scripts/x402socks.sh curl eu-north1 https://example.com/path
 ```
 
 If the helper exits non-zero, stop. Do not retry the same fetch directly, with a
-different proxy setting, or with `curl -n` / `--noproxy`. The helper uses TLS
-CONNECT on 3129 only. SOCKS5 (1080) and plaintext CONNECT (3128) are not part of
-this skill and must not be used for a production workflow. Python, Node, and
+different proxy setting, or with `curl -n` / `--noproxy`. Python, Node, and
 browser examples are in `references/endpoints.md`.
 
 There is no `proxy-config` command and no stdout credential output. Provider
@@ -177,10 +180,11 @@ navigate to first**. For browser work, use the shipped
 WebRTC, registers `context.route("**/*")` before navigation, uses
 `route.fetch({ maxRedirects: 0 })`, and validates every request and every
 resolved redirect against the same exact host and port allowlist before any
-network request. It verifies the final URL only as a secondary check. A one-time
-check of the initial URL, or a final-URL check after navigation, is not
-sufficient. If that runner is unavailable or cannot be used from an
-operator-trusted copy, do not use a browser with the proxy.
+network request. It re-runs those checks on every transport retry and verifies
+the final URL only as a secondary check. A one-time check of the initial URL, or
+a final-URL check after navigation, is not sufficient. If that runner is
+unavailable or cannot be used from an operator-trusted copy, do not use a
+browser with the proxy.
 
 ## Credential rules (hard)
 
@@ -194,13 +198,13 @@ operator-trusted copy, do not use a browser with the proxy.
   private file or a signer-owned store and consumes it inside the process.
 - Never echo a token into a chat, transcript, or commit. If one appears in
   output, treat it as burned and rotate it.
-- Use TLS CONNECT on 3129 only. Rotate on suspicion:
-  `scripts/x402socks.sh rotate` invalidates the old token immediately and saves
-  the replacement without printing it.
+- Use the fixed transport chain only; never send a target request directly.
+  Rotate on suspicion: `scripts/x402socks.sh rotate` invalidates the old token
+  immediately and saves the replacement without printing it.
 - Credential-bearing requests only go to `https://` x402socks hosts. The helper
   refuses any other host before reading the token, even when the certificate is
   valid, and pins curl to HTTPS. `X402SOCKS_ALLOW_INSECURE_API=1` is for a
-  trusted local test only.
+  trusted local test only and is separate from the proxy-TLS opt-in.
 
 ## Gotchas
 
@@ -220,7 +224,8 @@ operator-trusted copy, do not use a browser with the proxy.
 
 ## References
 
-- `references/wallet.md` - wallet access, `cast`, free Base RPCs, key handling.
+- `references/wallet.md` - browser and host signers, optional `cast` recipes,
+  free Base RPCs, key handling.
 - `references/payments.md` - x402 v2 flow, approval pinning, recovery.
 - `references/endpoints.md` - endpoints, client snippets, credential handling.
 - `scripts/x402socks-browser.mjs` - allowlisted Playwright runner for browser work.

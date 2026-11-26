@@ -10,6 +10,8 @@ set -euo pipefail
 WEB="${X402SOCKS_WEB:-https://x402socks.com}"
 PAY="${X402SOCKS_PAY:-https://payments.x402socks.com}"
 API="${X402SOCKS_API:-https://api.x402socks.com}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VERIFIER="${X402SOCKS_EIP191_VERIFIER:-$SCRIPT_DIR/eip191_verify.py}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
@@ -322,7 +324,17 @@ validate_token() {
 req_secret() {
   local url="$1"
   shift
-  local cfg proto
+  local cfg
+  local -a proto proxy_flags=() curl_cmd=(curl)
+  # Proxy target requests ignore ambient proxy settings and bypass lists so the
+  # configured exit is the only route. Provider API requests keep their normal
+  # environment. --proxy-insecure, when used, affects only the proxy hop.
+  if [ "${X402SOCKS_PROXY_REQUEST:-}" = "1" ]; then
+    curl_cmd=(env -u CURL_HOME -u curlrc
+      -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY
+      -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy curl)
+    proxy_flags=(--noproxy '' --globoff)
+  fi
   # Defense in depth: reject injection here even if a future caller forgets
   # require_https, because this is where the URL enters the curl config.
   reject_unsafe_text "credential URL" "$url"
@@ -335,7 +347,8 @@ req_secret() {
   {
     printf '%s\n' "$cfg"
     printf 'url = "%s"\n' "$(cfg_escape "$url")"
-  } | curl -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" "${proto[@]}" --config - "$@"
+  } | "${curl_cmd[@]}" -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" \
+      "${proto[@]}" --max-redirs 0 --config - "${proxy_flags[@]}" "$@"
 }
 
 json_token_body() {
@@ -535,9 +548,10 @@ x402socks helper
                                 and a mandatory approved X402SOCKS_MAX_USDC cap
   save-token                    read a token from stdin and store it (mode 600)
   check-exit <exit_id>          confirm an exit id is usable from /nodes.json
-  curl <exit_id> <target_url>   fetch an allowlisted HTTPS target through TLS
-                                 CONNECT on 3129; credentials stay inside the
-                                 helper and never reach stdout or argv
+  curl <exit_id> <target_url>   fetch an allowlisted HTTPS target through the
+                                  SOCKS5 1080 default, then TLS CONNECT 3129,
+                                  then plaintext CONNECT 3128; credentials stay
+                                  inside the helper and never reach stdout or argv
   status                        account status and usage
   validate                      cheap token check (exit 0 = valid)
   reconcile                     three-state check for purchases: exit 0 = valid
@@ -547,7 +561,8 @@ x402socks helper
   rotate                        rotate token; saves the new one, prints no secret
   verify-approval               verify an operator-signed, one-use decision;
                                  signature on stdin, no key material in argv
-  test [exit_id]                confirm egress IP; TLS CONNECT 3129 only
+  test [exit_id] [--socks5|--tls|--plaintext|--all]
+                                confirm egress IP and report the working transport
   recover-message <tx_hash>     print the message to EIP-191 sign (no newline)
   recover <tx_hash> <issued_at> re-issue a lost token; signature on stdin
                                 (pass the issued_at from recover-message)
@@ -571,6 +586,16 @@ Approval verification (operator-provisioned, outside agent write scope):
   X402SOCKS_APPROVAL_FILE       read-only signed approval record
   X402SOCKS_APPROVAL_SIGNER     pinned operator approval public address
   X402SOCKS_APPROVAL_CLAIMS_DIR private 0700 one-use claims directory
+  X402SOCKS_EIP191_VERIFIER     optional executable verifier; the bundled
+                                eip191_verify.py needs no extra install
+
+Transport selection:
+  X402SOCKS_PROXY_TRANSPORT     socks5 (default), tls, or plaintext; forces one
+                                transport instead of the fallback chain
+  X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1
+                                after all three transports fail, retry only the
+                                TLS CONNECT hop without proxy certificate
+                                verification; target TLS verification is kept
 
 Endpoint overrides (advanced):
   X402SOCKS_WEB / X402SOCKS_API
@@ -1008,12 +1033,99 @@ assert_token_valid() {
   [ "$code" = "204" ] || die "token is not valid before fetch (HTTP $code)"
 }
 
+# Proxy dialects are tried in a fixed order. SOCKS5 is the default. TLS HTTP
+# CONNECT on 3129 is the CONNECT fallback, plaintext CONNECT on 3128 is last,
+# and a separate explicit opt-in can retry TLS without verifying only the proxy
+# certificate. Target TLS verification and the destination allowlist never change.
+valid_proxy_transport() {
+  case "$1" in
+    socks5|tls|tls-insecure|plaintext) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+proxy_transport_list() {
+  local forced="${X402SOCKS_PROXY_TRANSPORT:-}"
+  if [ -n "$forced" ]; then
+    case "$forced" in
+      socks5|tls|plaintext) printf '%s\n' "$forced"; return ;;
+      tls-insecure) die "X402SOCKS_PROXY_TRANSPORT cannot force tls-insecure; use X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1" ;;
+      *) die "X402SOCKS_PROXY_TRANSPORT must be socks5, tls, or plaintext" ;;
+    esac
+  fi
+  printf '%s\n' socks5 tls plaintext
+}
+
+proxy_url_for() {
+  local transport="$1" exit_id="$2"
+  valid_proxy_transport "$transport" || die "unsupported proxy transport '$transport'"
+  case "$transport" in
+    socks5)       printf 'socks5h://%s.x402socks.com:1080' "$exit_id" ;;
+    tls|tls-insecure) printf 'https://%s.x402socks.com:3129' "$exit_id" ;;
+    plaintext)    printf 'http://%s.x402socks.com:3128' "$exit_id" ;;
+  esac
+}
+
+# One attempt only. A 407 response and every curl failure count as a transport
+# failure. Any other HTTP response is a target response and stops the chain.
+attempt_proxy_fetch() {
+  local exit_id="$1" target="$2" transport="$3" token="$4" body_file="$5"
+  local proxy cfg code
+  local extra=()
+  proxy="$(proxy_url_for "$transport" "$exit_id")"
+  cfg="$(printf 'proxy = "%s"\nproxy-user = "%s:%s"\n' \
+         "$(cfg_escape "$proxy")" "$(cfg_escape "$token")" \
+         "$(cfg_escape "$token")")"
+  [ "$transport" = "tls-insecure" ] && extra=(--proxy-insecure)
+  if ! code="$(printf '%s\n' "$cfg" | X402SOCKS_PROXY_REQUEST=1 req_secret "$target" \
+               -o "$body_file" -w '%{http_code}' "${extra[@]}")"; then
+    return 1
+  fi
+  [ "$code" = "407" ] && return 1
+  printf '%s' "$code"
+  return 0
+}
+
+# Writes the successful target body and transport name to the two output paths.
+# A failed transport never produces a target body or a success status.
+fetch_with_fallbacks() {
+  local exit_id="$1" target="$2" token="$3" output_file="$4" transport_file="${5:-}"
+  local transport body_file code
+  for transport in $(proxy_transport_list); do
+    body_file="$(mktemp "${TMPDIR:-/tmp}/x402socks-proxy.XXXXXX")"
+    if code="$(attempt_proxy_fetch "$exit_id" "$target" "$transport" \
+                "$token" "$body_file")"; then
+      note "transport: $transport (HTTP $code)"
+      cat "$body_file" > "$output_file"
+      [ -n "$transport_file" ] && printf '%s\n' "$transport" > "$transport_file"
+      rm -f "$body_file"
+      return 0
+    fi
+    rm -f "$body_file"
+  done
+
+  if [ "${X402SOCKS_ALLOW_INSECURE_PROXY_TLS:-}" = "1" ]; then
+    note "WARNING: retrying TLS CONNECT without proxy certificate verification"
+    body_file="$(mktemp "${TMPDIR:-/tmp}/x402socks-proxy.XXXXXX")"
+    if code="$(attempt_proxy_fetch "$exit_id" "$target" "tls-insecure" \
+                "$token" "$body_file")"; then
+      note "transport: tls-insecure (HTTP $code)"
+      cat "$body_file" > "$output_file"
+      [ -n "$transport_file" ] && printf '%s\n' "tls-insecure" > "$transport_file"
+      rm -f "$body_file"
+      return 0
+    fi
+    rm -f "$body_file"
+  fi
+  die "all allowed proxy transports failed; no direct fallback was attempted"
+}
+
 # Consume proxy credentials inside the helper. Nothing secret is written to
 # stdout, a file, or argv. Ambient proxy environment settings and NO_PROXY are
 # cleared, curl config files are ignored with -q, and redirects are disabled so
 # the request cannot leave the exact allowlisted HTTPS destination.
 cmd_fetch() {
-  local exit_id="${1:-}" target="${2:-}" proxy token cfg
+  local exit_id="${1:-}" target="${2:-}" token out
   [ -n "$exit_id" ] && [ -n "$target" ] || die "usage: curl <exit_id> <target_url>"
   [ "$#" -eq 2 ] || die "usage: curl <exit_id> <target_url>"
   require_https "X402SOCKS_WEB" "$WEB"
@@ -1021,18 +1133,11 @@ cmd_fetch() {
   check_exit_id "$exit_id"
   assert_token_valid
 
-  proxy="https://$exit_id.x402socks.com:3129"
   token="$(resolve_token)"
-  cfg="$(printf 'proxy = "%s"\nproxy-user = "%s:%s"\nurl = "%s"\n' \
-         "$(cfg_escape "$proxy")" "$(cfg_escape "$token")" \
-         "$(cfg_escape "$token")" "$(cfg_escape "$target")")"
-  printf '%s\n' "$cfg" | env \
-    -u CURL_HOME -u curlrc \
-    -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
-    -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
-    curl -q -sS --max-time "${X402SOCKS_TIMEOUT:-30}" \
-    --proto '=https' --proto-redir '=https' --max-redirs 0 \
-    --noproxy '' --globoff --config -
+  out="$(mktemp "${TMPDIR:-/tmp}/x402socks-body.XXXXXX")"
+  fetch_with_fallbacks "$exit_id" "$target" "$token" "$out"
+  cat "$out"
+  rm -f "$out"
 }
 
 # Verify an operator-signed or broker-issued approval before a wallet signature.
@@ -1044,7 +1149,8 @@ cmd_fetch() {
 cmd_verify_approval() {
   local file="${X402SOCKS_APPROVAL_FILE:-}" signer="${X402SOCKS_APPROVAL_SIGNER:-}"
   local claims="${X402SOCKS_APPROVAL_CLAIMS_DIR:-}" sig checked pair id hash msg
-  need cast
+  local tmp msg_file sig_file
+  need python3
   [ -n "$file" ] || die "X402SOCKS_APPROVAL_FILE is required"
   [ -n "$signer" ] || die "X402SOCKS_APPROVAL_SIGNER is required (pinned approval public address)"
   [ -n "$claims" ] || die "X402SOCKS_APPROVAL_CLAIMS_DIR is required"
@@ -1144,8 +1250,21 @@ PY
   hash="$(printf '%s\n' "$pair" | sed -n '2p')"
   msg="$(printf 'x402socks approval v1\n%s' "$hash")"
 
-  cast wallet verify -q --address "$signer" "$msg" "$sig" \
-    || die "approval signature did not verify against the pinned signer"
+  # The bundled verifier is dependency-free. An operator can replace it with an
+  # approved verifier through X402SOCKS_EIP191_VERIFIER; no wallet key, Foundry,
+  # or extra install is required. Files keep the message and signature out of
+  # argv and the temporary directory is private.
+  [ -x "$VERIFIER" ] || die "EIP-191 verifier is missing or not executable"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/x402socks-approval.XXXXXX")"
+  msg_file="$tmp/message"
+  sig_file="$tmp/signature"
+  printf '%s' "$msg" > "$msg_file"
+  printf '%s\n' "$sig" > "$sig_file"
+  if ! "$VERIFIER" "$msg_file" "$signer" "$sig_file"; then
+    rm -rf "$tmp"
+    die "approval signature did not verify against the pinned signer"
+  fi
+  rm -rf "$tmp"
 
   python3 - "$claims" "$id" <<'PY'
 import os, stat, sys
@@ -1170,17 +1289,20 @@ PY
   printf '{"state":"approved"}\n'
 }
 
-# TLS HTTP CONNECT is the only transport this helper uses: curl verifies the
-# exit certificate and the token is never sent in cleartext. Alternate proxy
-# dialects and plaintext CONNECT are legacy browser transports; the helper does
-# not offer them.
+# The egress test walks the same ordered transport chain as fetch and reports
+# the transport that actually succeeded. A cert-bypass retry is opt-in, warned,
+# and scoped to the TLS proxy hop only.
 cmd_test() {
-  local exit_id="eu-north1" have_exit=0 token body cfg code ip direct proxy
+  local exit_id="eu-north1" have_exit=0 token body cfg code ip direct
+  local out_file transport_file transport
   while [ $# -gt 0 ]; do
     case "$1" in
-      --tls) ;;
-      --)    shift; break ;;
-      -*)    die "unknown option: $1" ;;
+      --socks5)    X402SOCKS_PROXY_TRANSPORT=socks5 ;;
+      --tls)       X402SOCKS_PROXY_TRANSPORT=tls ;;
+      --plaintext) X402SOCKS_PROXY_TRANSPORT=plaintext ;;
+      --all)       unset X402SOCKS_PROXY_TRANSPORT ;;
+      --)          shift; break ;;
+      -*)          die "unknown option: $1" ;;
       *)
         [ "$have_exit" -eq 0 ] || die "only one exit id may be given"
         exit_id="$1"
@@ -1193,7 +1315,6 @@ cmd_test() {
 
   require_https "X402SOCKS_WEB" "$WEB"
   check_exit_id "$exit_id"
-  proxy="https://$exit_id.x402socks.com:3129"
 
   token="$(resolve_token)"
   body="$(printf '%s' "$token" | json_token_body)"
@@ -1224,15 +1345,18 @@ PY
     die "egress test requires X402SOCKS_BASELINE_IP or X402SOCKS_ALLOW_DIRECT_BASELINE=1"
   fi
 
-  cfg="$(printf 'proxy = "%s"\nproxy-user = "%s:%s"' \
-        "$(cfg_escape "$proxy")" "$(cfg_escape "$token")" "$(cfg_escape "$token")")"
-  ip="$(printf '%s' "$cfg" | req_secret https://api.ipify.org --noproxy '')" \
-       || die "egress failed via $exit_id (tls)"
+  out_file="$(mktemp "${TMPDIR:-/tmp}/x402socks-egress.XXXXXX")"
+  transport_file="$(mktemp "${TMPDIR:-/tmp}/x402socks-transport.XXXXXX")"
+  fetch_with_fallbacks "$exit_id" https://api.ipify.org "$token" \
+    "$out_file" "$transport_file"
+  ip="$(cat "$out_file")"
+  transport="$(cat "$transport_file")"
+  rm -f "$out_file" "$transport_file"
   [ -n "$ip" ] || die "egress IP was empty"
   [ "$ip" != "$direct" ] || die "egress IP did not change ($ip); the proxy was bypassed"
 
-  printf 'exit: %s\ntransport: tls\ndirect IP: %s\negress IP: %s\n' \
-    "$exit_id" "$direct" "$ip"
+  printf 'exit: %s\ntransport: %s\ndirect IP: %s\negress IP: %s\n' \
+    "$exit_id" "$transport" "$direct" "$ip"
 }
 
 cmd_recover_message() {
@@ -1289,7 +1413,7 @@ main() {
     validate)        need python3; cmd_validate ;;
     reconcile)       need python3; cmd_reconcile ;;
     rotate)          need python3; cmd_rotate ;;
-    verify-approval) need cast; cmd_verify_approval ;;
+    verify-approval) need python3; cmd_verify_approval ;;
     test)            need python3; cmd_test "$@" ;;
     recover-message) cmd_recover_message "$@" ;;
     recover)         need python3; cmd_recover "$@" ;;

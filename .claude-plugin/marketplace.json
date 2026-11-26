@@ -8,8 +8,8 @@
     {
       "name": "x402socks",
       "source": "./",
-      "description": "Buy and use proxy egress for agents over TLS HTTP CONNECT, paid per job in USDC with x402.",
-      "version": "1.3.6"
+      "description": "Buy and use proxy egress for agents over SOCKS5 with HTTP CONNECT fallbacks, paid per job in USDC with x402.",
+      "version": "1.4.0"
     }
   ]
 }

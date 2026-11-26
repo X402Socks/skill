@@ -51,7 +51,9 @@ unset X402SOCKS_TOKEN X402SOCKS_ALLOW_INSECURE_API X402SOCKS_BASELINE_IP X402SOC
 
 cat > "$BIN/curl" <<'EOF'
 #!/usr/bin/env bash
+cfg="$(cat)"
 printf 'curl %s\n' "$*" >> "${FAKE_CURL_LOG:?}"
+printf 'CFG:%s\n' "$cfg" >> "${FAKE_CURL_LOG:?}"
 printf 'ENV NO_PROXY=%s HTTP_PROXY=%s HTTPS_PROXY=%s ALL_PROXY=%s\n' \
   "${NO_PROXY-<unset>}" "${HTTP_PROXY-<unset>}" \
   "${HTTPS_PROXY-<unset>}" "${ALL_PROXY-<unset>}" >> "$FAKE_CURL_LOG"
@@ -60,22 +62,26 @@ if [ "${FAKE_STATUS-}" = fail ]; then
 fi
 dest=""
 prev=""
+noproxy=""
 for a in "$@"; do
   if [ "$prev" = "-o" ]; then dest="$a"; fi
-  if [ "$prev" = "--noproxy" ]; then
-    if [ "$a" = "*" ]; then
-      printf '%s' "${FAKE_DIRECT_IP:-203.0.113.10}"
-      exit 0
-    fi
-    if [ -z "$a" ] && [[ " $* " == *" api.ipify.org "* ]]; then
-      printf '%s' "${FAKE_PROXY_IP:-198.51.100.20}"
-      exit 0
-    fi
-  fi
+  if [ "$prev" = "--noproxy" ]; then noproxy="$a"; fi
   prev="$a"
 done
+# Proxy requests put the URL in the curl config, not argv.
+if printf '%s\n' "$cfg" | grep -q 'api\.ipify\.org'; then
+  if [ "$noproxy" = "*" ]; then
+    printf '%s' "${FAKE_DIRECT_IP:-203.0.113.10}"
+    exit 0
+  fi
+  if [ -z "$noproxy" ]; then
+    printf '%s' "${FAKE_PROXY_IP:-198.51.100.20}" > "$dest"
+    printf '%s' "${FAKE_PROXY_STATUS:-200}"
+    exit 0
+  fi
+fi
 if [ -n "$dest" ] && [ "$dest" != /dev/null ]; then
-  printf '%s' "${FAKE_BODY:-}" > "$dest"
+  printf '%s' "${FAKE_BODY:-${FAKE_RESPONSE:-}}" > "$dest"
 fi
 case "$*" in
   *"/nodes.json"*)
@@ -205,7 +211,7 @@ fi
 HELPER_ARGS=(curl eu-north1 https://example.com/path)
 run_helper X402SOCKS_ALLOWED_HOSTS=example.com FAKE_STATUS=204 FAKE_RESPONSE='BODY-ok' \
   NO_PROXY=evil.example HTTP_PROXY=http://evil.example HTTPS_PROXY=http://evil.example
-if [ "$LAST_RC" -eq 0 ] && [ "$LAST_OUT" = 'BODY-ok' ] &&
+if [ "$LAST_RC" -eq 0 ] && has <(printf '%s' "$LAST_OUT") 'BODY-ok' &&
    lacks <(printf '%s' "$LAST_OUT") 'TOKEN-abc123'; then
   pass "internal curl returns only the target body"
 else
@@ -219,17 +225,18 @@ if has "$FAKE_CURL_LOG" 'ENV NO_PROXY=<unset> HTTP_PROXY=<unset> HTTPS_PROXY=<un
 else
   bad "internal curl transport options: $(cat "$FAKE_CURL_LOG")"
 fi
-if has "$FAKE_CURL_LOG" '--config -' && lacks "$FAKE_CURL_LOG" '3128' &&
-   lacks_ci "$FAKE_CURL_LOG" 'socks5'; then
-  pass "internal curl keeps proxy settings in config, never a plaintext transport"
+if has "$FAKE_CURL_LOG" '--config -' &&
+   has "$FAKE_CURL_LOG" 'proxy = "socks5h://eu-north1.x402socks.com:1080"' &&
+   ! grep '^curl ' "$FAKE_CURL_LOG" | grep -qF 'TOKEN-abc123'; then
+  pass "internal curl keeps proxy settings in config and starts on SOCKS5"
 else
-  bad "internal curl used a non-TLS transport"
+  bad "internal curl proxy configuration: $(cat "$FAKE_CURL_LOG")"
 fi
-if has "$HELPER" ':3129' && lacks "$HELPER" ':3128' &&
-   lacks_ci "$HELPER" 'socks5h://'; then
-  pass "helper builds proxy URLs for TLS CONNECT 3129 only"
+if has "$HELPER" 'socks5h://' && has "$HELPER" ':3129' && has "$HELPER" ':3128' &&
+   has "$HELPER" "printf '%s\\n' socks5 tls plaintext"; then
+  pass "helper builds the ordered SOCKS5, TLS, and plaintext proxy URLs"
 else
-  bad "helper contains a non-TLS proxy URL"
+  bad "helper proxy transport chain is incomplete"
 fi
 
 run_helper FAKE_STATUS=204
@@ -322,7 +329,7 @@ else
 fi
 
 # 6. Documentation enforces the same contract.
-check_has "$SKILL" "version: 1.3.6" "skill version is 1.3.6"
+check_has "$SKILL" "version: 1.4.0" "skill version is 1.4.0"
 check_has "$SKILL" "UNTRUSTED PROVIDER DATA" "skill labels provider output"
 check_has "$SKILL" '"state":"inconclusive"' "skill names the inconclusive reconcile state"
 check_has "$SKILL" "set -e" "skill shell example is fail-fast"
@@ -352,8 +359,8 @@ check_has "$END" '["curl", "eu-north1", target]' "client snippets use the intern
 check_has "$END" 'serviceWorkers: "block"' "Playwright blocks service workers"
 check_has "$END" "--disable-webrtc" "Playwright disables WebRTC"
 check_has "$END" "UNTRUSTED PROVIDER DATA" "endpoints labels provider output"
-check_lacks "$END" "socks5h://" "endpoints publish no SOCKS5 address"
-check_lacks "$END" "http://<exit>.x402socks.com:3128" "endpoints publish no plaintext address"
+check_has "$END" "socks5://<exit>.x402socks.com:1080" "endpoints publish the SOCKS5 default"
+check_has "$END" "http://<exit>.x402socks.com:3128" "endpoints publish the plaintext fallback"
 check_lacks "$END" 'cat ~/.config/x402socks/token' "endpoints do not read the token directly"
 
 check_has "$TROUBLE" "reconcile" "troubleshooting uses the three-state check"
@@ -373,8 +380,8 @@ check_has "$APPROVAL" ".consumed" "approval template uses an exclusive one-use m
 check_has "$APPROVAL" "Actual signer object" "approval template binds the actual signer"
 check_lacks "$APPROVAL" "<approval-file>.consumed" "approval template no longer marks a path"
 
-check_has "$PLUGIN" '"version": "1.3.6"' "plugin manifest is 1.3.6"
-check_has "$MARKETPLACE" '"version": "1.3.6"' "marketplace manifest is 1.3.6"
+check_has "$PLUGIN" '"version": "1.4.0"' "plugin manifest is 1.4.0"
+check_has "$MARKETPLACE" '"version": "1.4.0"' "marketplace manifest is 1.4.0"
 
 if [ "$fail" = 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT" >&2; fi
 exit "$fail"

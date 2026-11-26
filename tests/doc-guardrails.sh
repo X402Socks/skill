@@ -58,7 +58,9 @@ check_has "$SKILL" "fresh explicit approval" "skill requires fresh approval for 
 check_has "$SKILL" "not just the URL you" "skill requires full-traffic target checks"
 check_has "$SKILL" "cap is" "skill states the spending cap is required"
 check_has "$SKILL" "UNTRUSTED PROVIDER DATA" "skill treats provider text as data"
-check_has "$SKILL" "version: 1.3.6" "skill version is 1.3.6"
+check_has "$SKILL" "version: 1.4.0" "skill version is 1.4.0"
+check_has "$SKILL" "SOCKS5 on **1080** first" "skill states the SOCKS5-first chain"
+check_has "$SKILL" "scripts/eip191_verify.py\` needs no extra install" "skill documents the dependency-free verifier"
 
 check_has "$END" "X402SOCKS_ALLOWED_HOSTS" "client snippets require target allowlist"
 check_has "$END" "curl -q" "manual curl examples ignore ambient config"
@@ -94,11 +96,11 @@ else
   bad "a documented curl invocation does not start with curl -q"
 fi
 
-if grep -q '"version": "1.3.6"' "$ROOT/.claude-plugin/plugin.json" &&
-   grep -q '"version": "1.3.6"' "$ROOT/.claude-plugin/marketplace.json"; then
-  pass "plugin manifests are version 1.3.6"
+if grep -q '"version": "1.4.0"' "$ROOT/.claude-plugin/plugin.json" &&
+   grep -q '"version": "1.4.0"' "$ROOT/.claude-plugin/marketplace.json"; then
+  pass "plugin manifests are version 1.4.0"
 else
-  bad "plugin manifests are not version 1.3.6"
+  bad "plugin manifests are not version 1.4.0"
 fi
 
 if [ "$fail" = 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT" >&2; fi

@@ -50,9 +50,15 @@ check_has "$RUNNER" 'MAX_TOKEN_BYTES = 4096' "token length is capped"
 check_has "$RUNNER" 'CONTROL.test(token)' "token control characters are refused"
 check_has "$RUNNER" 'MAX_BODY_BYTES = 1024 * 1024' "response body is capped at 1 MiB"
 check_has "$RUNNER" 'writeFileSync(output, capped, { mode: 0o600 })' "output file is private"
+check_has "$RUNNER" 'const PROXY_TRANSPORTS = [' "runner defines an ordered transport chain"
+check_has "$RUNNER" 'socks5://${exitId}.x402socks.com:1080' "runner starts on SOCKS5 port 1080"
+check_has "$RUNNER" 'https://${exitId}.x402socks.com:3129' "runner falls back to TLS CONNECT 3129"
+check_has "$RUNNER" 'http://${exitId}.x402socks.com:3128' "runner falls back to plaintext CONNECT 3128"
+check_has "$RUNNER" 'X402SOCKS_PROXY_TRANSPORT' "runner can isolate one transport for diagnosis"
+check_has "$RUNNER" 'cannot bypass only the proxy certificate' "runner explains the missing insecure proxy retry"
 check_lacks "$RUNNER" 'console.log' "runner never logs values with console.log"
-check_lacks "$RUNNER" '3128' "runner never mentions a plaintext listener"
-check_lacks_ci "$RUNNER" 'socks5' "runner never mentions an alternate proxy dialect"
+check_lacks "$RUNNER" '--proxy-insecure' "runner never bypasses proxy certificate verification"
+check_lacks "$RUNNER" 'ignoreHTTPSErrors' "runner never bypasses target certificate verification"
 check_lacks "$RUNNER" 'from "node:http"' "runner makes no direct HTTP requests"
 check_lacks "$RUNNER" 'from "node:https"' "runner makes no direct HTTPS requests"
 
@@ -137,7 +143,11 @@ class FakePage {
     }
     return { body: async () => Buffer.from(process.env.FAKE_BODY || 'BODY-ok') };
   }
-  url() { return process.env.FAKE_FINAL_URL || process.env.FAKE_TARGET || 'https://example.com/'; }
+  url() {
+    const value = process.env.FAKE_FINAL_URL || process.env.FAKE_TARGET || 'https://example.com/';
+    log('final:' + value);
+    return value;
+  }
   async content() { return '<html>fallback</html>'; }
 }
 const chromium = {
@@ -150,6 +160,13 @@ const chromium = {
       auth: auth,
       args: (options.args || []).join(','),
     }));
+    const prior = fs.existsSync(process.env.FAKE_PLAYWRIGHT_LOG)
+      ? fs.readFileSync(process.env.FAKE_PLAYWRIGHT_LOG, 'utf8')
+        .split('\n').filter((line) => line.startsWith('launch:')).length
+      : 0;
+    if (prior <= Number(process.env.FAKE_FAIL_PROXY_COUNT || 0)) {
+      throw new Error('offline transport failure');
+    }
     return {
       async newContext(contextOptions) {
         log('context:' + JSON.stringify({ serviceWorkers: contextOptions.serviceWorkers }));
@@ -181,6 +198,7 @@ run_runner() {
     FAKE_EXIT_ID="${FAKE_EXIT_ID:-eu-north1}" \
     FAKE_EXIT_RC="${FAKE_EXIT_RC:-0}" \
     FAKE_RECONCILE_RC="${FAKE_RECONCILE_RC:-0}" \
+    FAKE_FAIL_PROXY_COUNT="${FAKE_FAIL_PROXY_COUNT:-0}" \
     FAKE_STATUS="${FAKE_STATUS:-200}" \
     FAKE_LOCATION="${FAKE_LOCATION:-}" \
     FAKE_SUBREQUEST="${FAKE_SUBREQUEST:-}" \
@@ -211,16 +229,17 @@ else
   bad "helper call order: $(cat "$HELPER_LOG" 2>/dev/null)"
 fi
 if [ -f "$PLAYWRIGHT_LOG" ] &&
-   has "$PLAYWRIGHT_LOG" '"server":"https://eu-north1.x402socks.com:3129"' &&
+   has "$PLAYWRIGHT_LOG" '"server":"socks5://eu-north1.x402socks.com:1080"' &&
    has "$PLAYWRIGHT_LOG" '"auth":"matched"' &&
    has "$PLAYWRIGHT_LOG" '"args":"--disable-webrtc"' &&
    has "$PLAYWRIGHT_LOG" '"serviceWorkers":"block"' &&
    has "$PLAYWRIGHT_LOG" 'route:**/*' &&
    has "$PLAYWRIGHT_LOG" '"maxRedirects":0' &&
+   has "$PLAYWRIGHT_LOG" 'final:https://example.com/page' &&
    has "$PLAYWRIGHT_LOG" 'fulfill:response' &&
    lacks "$PLAYWRIGHT_LOG" 'abort:' &&
    lacks "$PLAYWRIGHT_LOG" "$FAKE_TOKEN"; then
-  pass "browser preflight and transport options are exact without leaking the token"
+  pass "browser preflight and SOCKS5 transport are exact without leaking the token"
 else
   bad "browser log: $(cat "$PLAYWRIGHT_LOG" 2>/dev/null)"
 fi
@@ -229,6 +248,39 @@ if ! contains "$LAST_OUT" "$FAKE_TOKEN"; then
 else
   bad "runner output contained the fake token"
 fi
+
+# 3a. A failed SOCKS5 hop retries TLS CONNECT then plaintext CONNECT. Each
+#     attempt is a fresh browser with a fresh allowlist and final URL recheck.
+FAKE_FAIL_PROXY_COUNT=2
+run_runner "https://example.com/page"
+launches="$(grep -c '^launch:' "$PLAYWRIGHT_LOG" 2>/dev/null || true)"
+routes="$(grep -c '^route:\*\*/\*$' "$PLAYWRIGHT_LOG" 2>/dev/null || true)"
+finals="$(grep -c '^final:' "$PLAYWRIGHT_LOG" 2>/dev/null || true)"
+s5="$(grep -n -F '"server":"socks5://eu-north1.x402socks.com:1080"' "$PLAYWRIGHT_LOG" | head -1 | cut -d: -f1)"
+tls="$(grep -n -F '"server":"https://eu-north1.x402socks.com:3129"' "$PLAYWRIGHT_LOG" | head -1 | cut -d: -f1)"
+plain="$(grep -n -F '"server":"http://eu-north1.x402socks.com:3128"' "$PLAYWRIGHT_LOG" | head -1 | cut -d: -f1)"
+if [ "$LAST_RC" -eq 0 ] && contains "$LAST_OUT" "transport: plaintext" &&
+   contains "$LAST_OUT" "transport socks5 failed; trying the next transport" &&
+   contains "$LAST_OUT" "transport tls failed; trying the next transport" &&
+   [ "$launches" = 3 ] && [ "$routes" -ge 1 ] && [ "$finals" -ge 1 ] &&
+   [ -n "$s5" ] && [ -n "$tls" ] && [ -n "$plain" ] &&
+   [ "$s5" -lt "$tls" ] && [ "$tls" -lt "$plain" ] &&
+   [ -f "$WORK/out.bin" ] && [ "$(cat "$WORK/out.bin")" = BODY-ok ]; then
+  pass "failed browser hops retry in order and the surviving attempt rechecks the target"
+else
+  bad "browser fallback (rc=$LAST_RC) output=$LAST_OUT log=$(cat "$PLAYWRIGHT_LOG" 2>/dev/null)"
+fi
+
+# 3b. When every transport fails, there is no direct fallback and no output.
+FAKE_FAIL_PROXY_COUNT=3
+run_runner "https://example.com/page"
+if [ "$LAST_RC" -ne 0 ] && contains "$LAST_OUT" "all proxy transports failed" &&
+   [ ! -f "$WORK/out.bin" ]; then
+  pass "all browser proxy failures stop without a direct fallback"
+else
+  bad "all browser hops fail (rc=$LAST_RC) output=$LAST_OUT"
+fi
+FAKE_FAIL_PROXY_COUNT=0
 
 # 4. Definitive no-token and inconclusive reconcile stop before browser traffic.
 FAKE_RECONCILE_RC=10

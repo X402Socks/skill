@@ -23,6 +23,14 @@ const MAX_TOKEN_BYTES = 4096;
 const CONTROL = /[\u0000-\u001F\u007F]/;
 const EXIT_ID = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const TOKEN_CHARS = /^[A-Za-z0-9_-]+$/;
+// SOCKS5 is the primary transport. The CONNECT listeners are compatibility
+// fallbacks. An insecure TLS proxy retry is deliberately absent here: Playwright
+// cannot bypass only the proxy certificate, and target TLS verification stays on.
+const PROXY_TRANSPORTS = [
+  { name: "socks5", server: (exitId) => `socks5://${exitId}.x402socks.com:1080` },
+  { name: "tls", server: (exitId) => `https://${exitId}.x402socks.com:3129` },
+  { name: "plaintext", server: (exitId) => `http://${exitId}.x402socks.com:3128` },
+];
 const HOP_BY_HOP = new Set([
   "connection",
   "keep-alive",
@@ -177,7 +185,19 @@ function assertAllowedUrl(input, allowlist) {
   return url;
 }
 
-async function fetchTarget({ exitId, target, output, token, allowlist }) {
+function proxyCandidates() {
+  const forced = process.env.X402SOCKS_PROXY_TRANSPORT;
+  if (!forced) return PROXY_TRANSPORTS;
+  const match = PROXY_TRANSPORTS.find((candidate) => candidate.name === forced);
+  if (!match) {
+    stop("error: X402SOCKS_PROXY_TRANSPORT must be socks5, tls, or plaintext");
+  }
+  return [match];
+}
+
+// One transport attempt. Every retry creates a fresh browser and context so the
+// full route interception, redirect checks, and final URL recheck run again.
+async function attemptFetch({ exitId, target, output, token, allowlist, transport }) {
   let chromium;
   try {
     ({ chromium } = require("playwright"));
@@ -185,18 +205,23 @@ async function fetchTarget({ exitId, target, output, token, allowlist }) {
     stop("error: Playwright is not available");
   }
 
-  const proxyServer = `https://${exitId}.x402socks.com:3129`;
   let browser;
+  let refusal = null;
   try {
     browser = await chromium.launch({
       args: ["--disable-webrtc"],
-      proxy: { server: proxyServer, username: token, password: token },
+      proxy: {
+        server: transport.server(exitId),
+        username: token,
+        password: token,
+      },
     });
     const context = await browser.newContext({ serviceWorkers: "block" });
     await context.route("**/*", async (route) => {
       try {
         assertAllowedUrl(route.request().url(), allowlist);
       } catch {
+        // A blocked subresource is contained; it must not fail the page.
         await route.abort("blockedbyclient");
         return;
       }
@@ -216,7 +241,8 @@ async function fetchTarget({ exitId, target, output, token, allowlist }) {
         try {
           redirectUrl = new URL(headers.location, route.request().url());
           assertAllowedUrl(redirectUrl.toString(), allowlist);
-        } catch {
+        } catch (error) {
+          refusal = error;
           await route.abort("blockedbyclient");
           return;
         }
@@ -234,6 +260,7 @@ async function fetchTarget({ exitId, target, output, token, allowlist }) {
 
     const page = await context.newPage();
     const response = await page.goto(target, { waitUntil: "load" });
+    if (refusal) throw refusal;
     assertAllowedUrl(page.url(), allowlist);
 
     const body = response
@@ -247,8 +274,14 @@ async function fetchTarget({ exitId, target, output, token, allowlist }) {
       process.stdout.write(capped);
     }
     process.stderr.write(
-      `status: ok\nbytes: ${capped.length}\ntruncated: ${truncated ? "true" : "false"}\n`
+      `status: ok\ntransport: ${transport.name}\nbytes: ${capped.length}\ntruncated: ${truncated ? "true" : "false"}\n`
     );
+    return true;
+  } catch (error) {
+    if (error instanceof Stop || refusal) {
+      throw error instanceof Stop ? error : refusal;
+    }
+    return false;
   } finally {
     if (browser) {
       try {
@@ -258,6 +291,16 @@ async function fetchTarget({ exitId, target, output, token, allowlist }) {
       }
     }
   }
+}
+
+async function fetchTarget({ exitId, target, output, token, allowlist }) {
+  for (const transport of proxyCandidates()) {
+    if (await attemptFetch({ exitId, target, output, token, allowlist, transport })) {
+      return;
+    }
+    process.stderr.write(`transport ${transport.name} failed; trying the next transport\n`);
+  }
+  stop("error: all proxy transports failed; no direct fallback was attempted");
 }
 
 async function main() {

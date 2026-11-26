@@ -42,7 +42,9 @@ check_lacks_ci() {
 # ---------------------------------------------------------------------------
 
 # Finding 1: payment approval is not authenticated.
-check_has "$HELPER" 'cast wallet verify -q --address' "helper verifies a detached EIP-191 signature"
+check_has "$HELPER" 'eip191_verify.py' "helper uses the bundled dependency-free verifier"
+check_has "$HELPER" '"$VERIFIER" "$msg_file" "$signer" "$sig_file"' "helper verifies a detached EIP-191 signature"
+check_lacks_ci "$HELPER" 'cast wallet verify' "helper has no hard cast dependency"
 check_has "$HELPER" 'approval_id' "helper binds a fresh approval id"
 check_has "$HELPER" 'approval_hash' "helper binds the canonical approval hash"
 check_has "$HELPER" 'approval_signer' "helper binds the operator signer field"
@@ -98,13 +100,14 @@ check_has "$TROUBLE" 'verify-approval' "troubleshooting requires a fresh signed 
 check_has "$HELPER" 'require_public_origin' "helper validates public discovery origins"
 check_has "$HELPER" 'require_payment_origin' "helper validates the payment origin"
 check_has "$HELPER" 'require_https "X402SOCKS_API"' "helper validates credential-bearing API origins"
-check_has "$HELPER" 'https://$exit_id.x402socks.com:3129' "helper uses TLS CONNECT on 3129"
-check_lacks "$HELPER" '3128' "helper has no plaintext transport"
-check_lacks_ci "$HELPER" 'socks5' "helper has no SOCKS5 transport"
+check_has "$HELPER" 'socks5h://%s.x402socks.com:1080' "helper has the SOCKS5 default"
+check_has "$HELPER" 'https://%s.x402socks.com:3129' "helper has the TLS CONNECT fallback"
+check_has "$HELPER" 'http://%s.x402socks.com:3128' "helper has the plaintext CONNECT fallback"
+check_has "$HELPER" 'X402SOCKS_ALLOW_INSECURE_PROXY_TLS' "helper gates proxy-only TLS bypass"
 check_lacks_ci "$README" 'anonymous' "root README uses neutral privacy wording"
 check_lacks_ci "$SKILL_README" 'anonymous' "skill README uses neutral privacy wording"
 check_lacks_ci "$SKILL" 'anonymous' "skill uses neutral privacy wording"
-check_has "$README" 'for an authorized target' "root README states target authorization"
+check_has "$README" 'for authorized agent traffic' "root README states target authorization"
 check_has "$SKILL_README" 'targets you are authorized' "skill README states target authorization"
 
 # ---------------------------------------------------------------------------
@@ -128,20 +131,23 @@ printf 'curl %s\n' "$*" >> "${FAKE_CURL_LOG:?}"
 if [ "${FAKE_STATUS-}" = fail ]; then exit 7; fi
 dest=""
 prev=""
+noproxy=""
 for a in "$@"; do
   if [ "$prev" = "-o" ]; then dest="$a"; fi
-  if [ "$prev" = "--noproxy" ]; then
-    if [ "$a" = "*" ]; then
-      printf '%s' "${FAKE_DIRECT_IP:-203.0.113.10}"
-      exit 0
-    fi
-    if [ -z "$a" ] && [[ " $* " == *" api.ipify.org "* ]]; then
-      printf '%s' "${FAKE_PROXY_IP:-198.51.100.20}"
-      exit 0
-    fi
-  fi
+  if [ "$prev" = "--noproxy" ]; then noproxy="$a"; fi
   prev="$a"
 done
+if [[ " $* " == *" api.ipify.org "* ]]; then
+  if [ "$noproxy" = "*" ]; then
+    printf '%s' "${FAKE_DIRECT_IP:-203.0.113.10}"
+    exit 0
+  fi
+  if [ -z "$noproxy" ]; then
+    printf '%s' "${FAKE_PROXY_IP:-198.51.100.20}" > "$dest"
+    printf '%s' "${FAKE_PROXY_STATUS:-200}"
+    exit 0
+  fi
+fi
 if [ -n "$dest" ] && [ "$dest" != /dev/null ]; then
   printf '%s' "${FAKE_BODY:-}" > "$dest"
 fi
@@ -153,28 +159,34 @@ esac
 EOF
 chmod +x "$BIN/curl"
 
-# A deterministic stand-in for `cast wallet verify`. It accepts only the exact
-# signature for the exact message and the pinned address, so message tampering
-# and signer substitution fail the same way they would with real EIP-191.
+# A deterministic stand-in verifier. It reads the message and signature from
+# files, just like the bundled verifier, and accepts only the exact signature
+# for the exact message and pinned address. No wallet key or cast is involved.
 FAKE_SIGNING_SECRET='offline-test-secret-not-a-wallet-key'
 export FAKE_SIGNING_SECRET
-cat > "$BIN/cast" <<'EOF'
-#!/usr/bin/env bash
-if [ "${1:-}" != wallet ] || [ "${2:-}" != verify ] || [ "${3:-}" != -q ] ||
-   [ "${4:-}" != --address ]; then
-  exit 2
-fi
-expected="$(python3 -c '
-import hashlib, os, sys
-msg = sys.argv[1]
-seed = (os.environ["FAKE_SIGNING_SECRET"] + "|" + msg).encode()
-print("0x" + hashlib.sha512(seed).hexdigest() + hashlib.sha256(seed).hexdigest()[:2])
-' "$6")"
-[ "$7" = "$expected" ] || exit 1
-[ "${5,,}" = "${FAKE_APPROVAL_SIGNER,,}" ] || exit 1
-exit 0
+cat > "$BIN/fake-eip191-verify" <<'EOF'
+#!/usr/bin/env python3
+import hashlib
+import os
+import re
+import sys
+
+if len(sys.argv) != 4:
+    sys.exit(2)
+with open(sys.argv[1], "rb") as fh:
+    message = fh.read()
+with open(sys.argv[3], "rb") as fh:
+    signature = fh.read().decode("ascii").strip()
+expected_address = sys.argv[2].strip().lower()
+seed = (os.environ["FAKE_SIGNING_SECRET"] + "|").encode() + message
+expected = "0x" + hashlib.sha512(seed).hexdigest() + hashlib.sha256(seed).hexdigest()[:2]
+if not re.fullmatch(r"0x[0-9a-f]{130}", signature):
+    sys.exit(1)
+if signature != expected or expected_address != os.environ["FAKE_APPROVAL_SIGNER"].lower():
+    sys.exit(1)
 EOF
-chmod +x "$BIN/cast"
+chmod +x "$BIN/fake-eip191-verify"
+export X402SOCKS_EIP191_VERIFIER="$BIN/fake-eip191-verify"
 PATH="$BIN:$PATH"
 export PATH
 

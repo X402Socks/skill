@@ -1,8 +1,8 @@
 # Endpoints and client snippets
 
 All shapes below were verified against the live service. Fields are
-additive-compatible; treat unknown fields as ignorable. For wallet setup and
-`cast`, see `wallet.md`.
+additive-compatible; treat unknown fields as ignorable. For wallet and signer
+setup, see `wallet.md`.
 
 ## Discovery
 
@@ -19,15 +19,20 @@ additive-compatible; treat unknown fields as ignorable. For wallet setup and
 
 ## Transport
 
-TLS HTTP CONNECT on port 3129 (`https://<exit>.x402socks.com:3129`) is the only
-transport this skill uses. The exit presents a valid certificate and curl
-verifies it, so the token is encrypted on the client-to-exit hop. The TLS
-listeners are on `eu-north1`, `asia-central2`, and `asia-west1`.
+The helper and browser runner try, in order:
 
-SOCKS5 and plaintext CONNECT are unsupported legacy browser transports. Both
-send the reusable token unencrypted on the client-to-exit hop, so this skill
-gives no address or recipe for them. If a client cannot use TLS CONNECT, stop
-and ask the operator rather than downgrading the transport.
+1. SOCKS5 on `socks5://<exit>.x402socks.com:1080` (default)
+2. TLS HTTP CONNECT on `https://<exit>.x402socks.com:3129`
+3. Plaintext HTTP CONNECT on `http://<exit>.x402socks.com:3128`
+
+CONNECT listeners are compatibility hops and are not guaranteed on every exit.
+A failed hop moves to the next one. There is never a direct request to the
+target. Target HTTPS certificate verification stays enabled on all three hops.
+`X402SOCKS_PROXY_TRANSPORT=socks5|tls|plaintext` forces a single hop for
+diagnosis. `X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` permits one final retry of the
+TLS CONNECT hop with curl `--proxy-insecure` after all three hops fail. That
+opt-in warns, affects only the proxy certificate, and never relaxes target TLS
+or provider API requests. The browser runner never bypasses target TLS.
 
 ## Service state
 
@@ -94,6 +99,9 @@ The `quote` and `recover` commands pin `X402SOCKS_PAY` to the exact origin
 `https://payments.x402socks.com:443`. `X402SOCKS_ALLOW_INSECURE_API=1` is only
 for a trusted loopback test harness; a non-loopback override is refused before
 any request. Do not use it to reach the public service or with a real token.
+`X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` is separate and applies only to the TLS
+proxy hop after the normal chain fails. It does not authorize any provider API
+origin or any target TLS downgrade.
 
 ### `POST /api/token/status`
 
@@ -190,7 +198,7 @@ There is no `proxy-config` command. Never ask the helper to emit a proxy
 configuration, and never print, capture, or file a token outside the helper or
 the operator-trusted browser runner.
 
-### curl (TLS CONNECT, recommended)
+### curl (SOCKS5 with CONNECT fallbacks)
 
 ```bash
 # One command. The helper validates the token and exit, clears ambient proxy
@@ -204,11 +212,12 @@ X402SOCKS_ALLOWED_HOSTS=example.com:443 \
 Do not wrap this in a pipe or add a second `curl` fallback. `curl -q` ignores
 ambient curl config, the environment is cleared of proxy and bypass variables,
 the proto pins block plaintext redirects, and `--max-redirs 0` blocks all
-redirects, so the request cannot leave the approved HTTPS target. `curl`
-verifies the exit certificate by default. If that check fails, the exit is not
-usable; do not disable verification or fall back to plaintext.
+redirects, so the request cannot leave the approved HTTPS target. The helper
+reports the transport that worked on stderr. If all hops fail, stop. Do not add
+a direct fallback or bypass target TLS. The proxy-only cert retry requires the
+explicit `X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` opt-in.
 
-### Python (urllib3, TLS CONNECT)
+### Python (helper subprocess)
 
 ```python
 import os
@@ -236,7 +245,7 @@ The helper owns the token, the proxy connection, the target allowlist, and the
 redirect decision. Python receives only the target body. No third-party HTTP
 client is needed for this path; `urllib3` may still be used for non-proxy work.
 
-### Node (undici, TLS CONNECT)
+### Node (helper subprocess)
 
 ```js
 import { stat } from "node:fs/promises";
@@ -264,11 +273,11 @@ redirect decision. Node receives only the target body. If a different HTTP
 client is required for the target protocol, keep a trusted runner outside the
 agent's write scope; do not ask the helper to print credentials.
 
-### Playwright (TLS CONNECT)
+### Playwright (SOCKS5 with CONNECT fallbacks)
 
-Chromium cannot authenticate to a proxy with username and password unless the
-proxy uses HTTP CONNECT. Use the TLS HTTP CONNECT listener. Do not write an ad
-hoc browser client. Use the shipped runner from an operator-trusted copy:
+Do not write an ad hoc browser client. Use the shipped runner from an
+operator-trusted copy. It passes the token as proxy credentials on the SOCKS5
+default and retries through the two CONNECT listeners if needed:
 
 ```bash
 X402SOCKS_ALLOWED_HOSTS=example.com:443 \
@@ -283,7 +292,9 @@ uses `route.fetch({ maxRedirects: 0 })` so Playwright cannot follow a redirect
 on its own. Every request and every resolved redirect Location is checked
 against the same exact HTTPS host and port allowlist before it is allowed. The
 final URL is checked again only as secondary evidence. A one-time URL check or
-a final-URL check is not a network boundary.
+a final-URL check is not a network boundary. Each transport retry builds a new
+browser and context and repeats all interception and allowlist checks. Target
+TLS verification is never disabled in the runner.
 
 The runner prints fixed status metadata and the target body. It never prints
 the token, the proxy launch options, or provider-controlled field names. If the

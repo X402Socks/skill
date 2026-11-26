@@ -2,56 +2,45 @@
 
 An [Agent Skill](https://agentskills.io) for buying short-lived proxy egress
 from a different source IP or a specific region for targets you are authorized
-to access. It pays in USDC on Base through [x402](https://x402.org). TLS HTTP
-CONNECT on 3129 is the only transport the skill uses; SOCKS5 and plaintext
-CONNECT are not part of its workflows.
+to access. It pays in USDC on Base through [x402](https://x402.org).
 
-The skill teaches an agent to quote a package, get approval for an exact amount,
-complete the x402 v2 payment, store the one-time token safely, route traffic
-through a chosen exit, and prove that the egress IP actually changed.
+Transport order is fixed: SOCKS5 on `1080`, TLS HTTP CONNECT on `3129`, then
+plaintext HTTP CONNECT on `3128`. CONNECT hops are compatibility fallbacks and
+may not exist on every exit. Target TLS verification stays on. A proxy-only
+certificate bypass requires an explicit operator opt-in after all three hops
+fail.
+
+The skill teaches an agent to quote a package, get signed approval for exact
+terms, complete the x402 v2 payment, store the one-time token safely, route
+traffic through a chosen exit, and verify that egress changed.
 
 ## Wallet access (required)
 
-The agent cannot use this skill without a wallet it can operate. There is no free
-tier, and no account credit: without wallet access there is no way to buy a
-package.
+The agent cannot use this skill without a wallet it can sign with. There is no
+free tier and no account credit.
 
 1. **An EVM-compatible wallet funded with USDC on Base.** The cheapest package is
    $1.00 for 6 hours / 1 GB. USDC on Base is
    `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`. No ETH is needed for the x402
-   purchase because the facilitator submits the EIP-3009 transfer; a manual
-   `cast send` needs ETH for gas.
-2. **A signing method the agent can use non-interactively.** Use a Foundry
-   encrypted keystore (`cast wallet import <name> --interactive`, then
-   `--keystore <path> --password-file <0600 file>`), a hardware wallet, or a
-   signer configured in the x402 client. Do not paste a raw private key into
-   chat.
-3. **`cast` and a free Base RPC for low-volume checks.** For example:
+   purchase because the facilitator submits the EIP-3009 transfer. A manual send
+   needs ETH for gas.
+2. **A signer the agent can use non-interactively.** Prefer an injected browser
+   wallet (EIP-1193), a signer-owned store, or an x402 client signer. No extra
+   install is required. A Foundry encrypted keystore, hardware wallet, KMS, or
+   HSM is also valid. Do not paste a raw private key into chat or argv.
+3. **A Base RPC is optional** for low-volume checks, for example
+   `https://mainnet.base.org`, `https://base-rpc.publicnode.com`,
+   `https://1rpc.io/base`, or `https://base.drpc.org`.
 
-   ```bash
-   export BASE_RPC=https://mainnet.base.org
-   export USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-   export KEYSTORE="$HOME/.foundry/keystores/x402socks"
-   export KEYPASS="$HOME/.config/x402socks/keystore.pass"   # mode 600
-   export ADDR="$(cast wallet address --keystore "$KEYSTORE" --password-file "$KEYPASS")"
-   cast call "$USDC" "balanceOf(address)(uint256)" "$ADDR" --rpc-url "$BASE_RPC"
-   ```
-
-   The result is atomic USDC (6 decimals), so `1000000` is $1.00. Other free
-   public Base RPCs: `https://base-rpc.publicnode.com`, `https://1rpc.io/base`,
-   `https://base.drpc.org`.
-
-**Never print or output the private key in a terminal, log, chat, or commit, and
-never pass it as a command argument.** Use an encrypted keystore or hardware
-wallet; keep the keystore and password file at mode `0600`. See
-[`references/wallet.md`](references/wallet.md) for manual sends, EIP-712
-signing, and recovery.
+Never print or output a private key in a terminal, log, chat, or commit. Keep
+key material in a signer-owned store or mode `0600` files. See
+[`references/wallet.md`](references/wallet.md) for browser and host signer paths.
+`cast` recipes there are optional.
 
 ### Other requirements
 
-- An Agent Skills client that can run shell commands (Claude Code, Codex,
-  Cursor, GitHub Copilot, OpenCode, and others).
-- `curl`, plus `python3` for the helper.
+- An Agent Skills client that can run shell commands.
+- `curl` and `python3` for the helper. No `cast` requirement.
 - Node.js + npm for the TypeScript x402 client, or Python 3.10+ with `uv` for
   the Python client.
 
@@ -74,34 +63,35 @@ cp -r skills/x402socks ~/.agents/skills/       # OpenCode and other clients
 
 | Path | Purpose |
 | --- | --- |
-| `SKILL.md` | The skill itself: triggers, wallet requirement, spending rule, buy flow, routing, credential rules. |
-| `references/wallet.md` | `cast` recipes: address, USDC balance, manual send, EIP-712 signing, key handling. |
-| `references/payments.md` | x402 v2 flow, guarded TypeScript/Python clients, recovery. |
-| `references/endpoints.md` | Endpoints, client snippets, safe credential handling. |
-| `references/troubleshooting.md` | Symptom-to-cause table for 401/402/407/connection errors. |
-| `scripts/x402socks.sh` | Helper: health, nodes, quote, status, validate, rotate, test, recover. |
-| `assets/purchase-approval.md` | Template for recording the approved amount before spending. |
+| `SKILL.md` | Triggers, wallet requirement, spending rule, buy flow, routing, credential rules. |
+| `references/wallet.md` | Browser and host signers, optional `cast` recipes, key handling. |
+| `references/payments.md` | x402 v2 flow, approval pinning, guarded clients, recovery. |
+| `references/endpoints.md` | Endpoints, client snippets, transport chain, credential handling. |
+| `references/troubleshooting.md` | Symptom-to-cause table for 401/402/407/transport errors. |
+| `scripts/x402socks.sh` | Helper CLI: quote, status, validate, rotate, recover, test, curl. |
+| `scripts/x402socks-browser.mjs` | Allowlisted Playwright runner with transport fallbacks. |
+| `assets/purchase-approval.md` | Template for recording the approved terms. |
 
 ## Safety defaults
 
-- **Spending:** the skill requires explicit approval for an exact amount and
-  enforces it against the live 402 challenge before signing.
+- **Spending:** the skill requires operator-signed approval for an exact term
+  set and checks it against the live 402 challenge before signing. The bundled
+  pure-Python verifier needs no extra install.
 - **Credentials:** the helper reads the token from a `0600` file
-  (`~/.config/x402socks/token`) and passes it to curl on stdin, so it never
-  appears in the process list. Rotation and recovery save the replacement token
-  instead of printing it. The helper only sends credentials to `https://`
-  x402socks hosts: a plaintext or foreign-host override is refused before the
-  token is read, and credential transfers are restricted to HTTPS. Token reads
-  and writes both require a private regular file owned by the current user (no
-  symlinks, no group/world access). Tokens must be base64url/hex, and the helper
-  rejects CR/LF and control characters in tokens and endpoint overrides and
-  parses each URL before reading credentials, so an environment value cannot
-  inject curl configuration. `X402SOCKS_ALLOW_INSECURE_API=1` is for a trusted
-  local test only.
-- **Transport:** TLS HTTP CONNECT on port 3129 is the only transport the helper
-  uses (`eu-north1`, `asia-central2`, `asia-west1`). SOCKS5 and plaintext HTTP
-  CONNECT exist for legacy browser clients, send the token unencrypted, and are
-  not part of the agent workflow.
+  (`~/.config/x402socks/token`) or a signer-owned store. Proxy credentials are
+  consumed inside the helper and never reach stdout, argv, logs, URLs, or
+  browser storage. Rotation and recovery save the replacement token instead of
+  printing it.
+- **Origins:** credential-bearing requests only go to pinned `https://`
+  x402socks origins with exact ports. Public discovery origins are validated too.
+  `X402SOCKS_ALLOW_INSECURE_API=1` is for a trusted loopback test only and is
+  separate from the proxy TLS opt-in.
+- **Transport:** all traffic goes through the proxy. SOCKS5 is first, TLS
+  CONNECT is second, plaintext CONNECT is last. The helper clears ambient proxy
+  bypass settings, pins HTTPS targets, and disables redirects. The browser
+  runner blocks service workers, disables WebRTC, allows every request and
+  redirect through an exact host and port allowlist, and rechecks the final URL
+  on each transport attempt.
 
 ## Links
 
