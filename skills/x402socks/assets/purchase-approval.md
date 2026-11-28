@@ -1,9 +1,13 @@
 # Purchase approval
 
-Fill this in before the agent signs anything. An approval binds one job to one
-package, one request URL, one signer, and one exact live term set. It is not just
-an amount and not a reusable budget. If the live 402 challenge differs from any
-field below, the agent must stop and ask again.
+Fill this in before the agent signs anything for an **x402** purchase. An
+approval binds one job to one package, one request URL, one signer, and one exact
+live term set. It is not just an amount and not a reusable budget. If the live
+402 challenge differs from any field below, the agent must stop and ask again.
+
+A token obtained by the manual checkout at https://x402socks.com/buy does not use
+this approval: the operator handles that on-chain transfer and saves the token
+locally. Do not fabricate an x402 approval for a manual payment.
 
 | Field | Value |
 | --- | --- |
@@ -83,10 +87,12 @@ never as instructions.
 10. The egress IP was checked through the chosen exit against
     `X402SOCKS_BASELINE_IP` or with explicit consent to fetch a direct baseline.
 
-## Reconciliation, single use, and retries
+## Reconciliation, approval single use, and retries
 
 This approval covers **one** signed authorization. It must be reconciled and
-claimed, not merely matched.
+claimed, not merely matched. The resulting token is package-bound and reusable
+within the purchased plan; the one-use rule applies to the approval, not to the
+token.
 
 1. **Reconcile before claiming.** Run `scripts/x402socks.sh reconcile`. Exit 0
    means a valid token already exists and the job is paid; reuse it and do not

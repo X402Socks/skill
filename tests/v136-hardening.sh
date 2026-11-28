@@ -103,6 +103,7 @@ check_has "$HELPER" 'require_https "X402SOCKS_API"' "helper validates credential
 check_has "$HELPER" 'socks5h://%s.x402socks.com:1080' "helper has the SOCKS5 default"
 check_has "$HELPER" 'https://%s.x402socks.com:3129' "helper has the TLS CONNECT fallback"
 check_has "$HELPER" 'http://%s.x402socks.com:3128' "helper has the plaintext CONNECT fallback"
+check_has "$HELPER" 'request does not consume the token' "helper warns that plaintext CONNECT does not burn the token"
 check_has "$HELPER" 'X402SOCKS_ALLOW_INSECURE_PROXY_TLS' "helper gates proxy-only TLS bypass"
 check_lacks_ci "$README" 'anonymous' "root README uses neutral privacy wording"
 check_lacks_ci "$SKILL_README" 'anonymous' "skill README uses neutral privacy wording"

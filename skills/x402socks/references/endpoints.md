@@ -19,18 +19,22 @@ setup, see `wallet.md`.
 
 ## Transport
 
-The helper and browser runner try, in order:
+Both SOCKS5 and CONNECT TLS are native proxy transports. The helper and browser
+runner try, in order:
 
-1. SOCKS5 on `socks5://<exit>.x402socks.com:1080` (default)
-2. TLS HTTP CONNECT on `https://<exit>.x402socks.com:3129`
-3. Plaintext HTTP CONNECT on `http://<exit>.x402socks.com:3128`
+1. SOCKS5 on `socks5://<exit>.x402socks.com:1080` when the client supports it
+2. CONNECT + TLS on `https://<exit>.x402socks.com:3129`
+3. Plaintext HTTP CONNECT on `http://<exit>.x402socks.com:3128` only when no
+   secure channel works
 
-CONNECT listeners are compatibility hops and are not guaranteed on every exit.
-A failed hop moves to the next one. There is never a direct request to the
-target. Target HTTPS certificate verification stays enabled on all three hops.
+Listener availability is exit-dependent. A failed hop moves to the next one.
+There is never a direct request to the target. If plaintext CONNECT was the only
+working hop, use a short-lived token and prefer a fresh token for the next agent
+or job; the request does not consume the token. Target HTTPS certificate
+verification stays enabled on all hops.
 `X402SOCKS_PROXY_TRANSPORT=socks5|tls|plaintext` forces a single hop for
 diagnosis. `X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` permits one final retry of the
-TLS CONNECT hop with curl `--proxy-insecure` after all three hops fail. That
+TLS CONNECT hop with curl `--proxy-insecure` after the normal chain fails. That
 opt-in warns, affects only the proxy certificate, and never relaxes target TLS
 or provider API requests. The browser runner never bypasses target TLS.
 
@@ -86,7 +90,10 @@ never cache the set or infer how many exits exist.
 
 The response carries `catalog_digest` and `content_sha256`. Pin the digest if
 you want to detect that prices changed between quote and purchase. Internal
-visibility packages are excluded from this public feed.
+visibility packages are excluded from this public feed. `max_sessions` is an
+active-session limit, not a one-use token: the returned token is package-bound
+and reusable within the plan's time, data, and session limits. Short, cheap
+packages make one or a few sessions typical.
 
 ## Credentials
 
@@ -176,6 +183,15 @@ the payment if any advertised option falls outside the approval, if the list is
 ambiguous, or if a later 402 appears after a signed authorization. See
 `payments.md`.
 
+### Manual token acquisition
+
+The documented checkout at https://x402socks.com/buy accepts the configured
+direct stablecoin transfers. The operator creates the intent, sends the exact
+transfer once, and saves the returned token locally after confirmation. An agent
+without a usable signer should stop here instead of asking the operator to paste
+a token into chat or argv. Manual checkout does not create an x402 approval and
+does not authorize the agent to spend.
+
 ### `POST https://payments.x402socks.com/v1/access/recover`
 
 See `payments.md`. Not listed in `openapi.json` because it is not payable.
@@ -198,7 +214,7 @@ There is no `proxy-config` command. Never ask the helper to emit a proxy
 configuration, and never print, capture, or file a token outside the helper or
 the operator-trusted browser runner.
 
-### curl (SOCKS5 with CONNECT fallbacks)
+### curl (agent-first transport chain)
 
 ```bash
 # One command. The helper validates the token and exit, clears ambient proxy
@@ -213,9 +229,10 @@ Do not wrap this in a pipe or add a second `curl` fallback. `curl -q` ignores
 ambient curl config, the environment is cleared of proxy and bypass variables,
 the proto pins block plaintext redirects, and `--max-redirs 0` blocks all
 redirects, so the request cannot leave the approved HTTPS target. The helper
-reports the transport that worked on stderr. If all hops fail, stop. Do not add
-a direct fallback or bypass target TLS. The proxy-only cert retry requires the
-explicit `X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` opt-in.
+reports the transport that worked on stderr. If it reports plaintext CONNECT,
+finish only the approved job and rotate the token before reusing it. If all hops
+fail, stop. Do not add a direct fallback or bypass target TLS. The proxy-only
+cert retry requires the explicit `X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` opt-in.
 
 ### Python (helper subprocess)
 
@@ -273,11 +290,12 @@ redirect decision. Node receives only the target body. If a different HTTP
 client is required for the target protocol, keep a trusted runner outside the
 agent's write scope; do not ask the helper to print credentials.
 
-### Playwright (SOCKS5 with CONNECT fallbacks)
+### Playwright (agent-first transport chain)
 
 Do not write an ad hoc browser client. Use the shipped runner from an
-operator-trusted copy. It passes the token as proxy credentials on the SOCKS5
-default and retries through the two CONNECT listeners if needed:
+operator-trusted copy. It passes the token as proxy credentials on SOCKS5 when
+available, retries through CONNECT + TLS, and uses plaintext CONNECT only as a
+last resort:
 
 ```bash
 X402SOCKS_ALLOWED_HOSTS=example.com:443 \

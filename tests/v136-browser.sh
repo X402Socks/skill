@@ -54,6 +54,8 @@ check_has "$RUNNER" 'const PROXY_TRANSPORTS = [' "runner defines an ordered tran
 check_has "$RUNNER" 'socks5://${exitId}.x402socks.com:1080' "runner starts on SOCKS5 port 1080"
 check_has "$RUNNER" 'https://${exitId}.x402socks.com:3129' "runner falls back to TLS CONNECT 3129"
 check_has "$RUNNER" 'http://${exitId}.x402socks.com:3128' "runner falls back to plaintext CONNECT 3128"
+check_has "$RUNNER" 'request does not consume the token' "runner warns that plaintext CONNECT does not burn the token"
+check_has "$RUNNER" 'codespell:ignore te' "HTTP TE header is exempted from codespell"
 check_has "$RUNNER" 'X402SOCKS_PROXY_TRANSPORT' "runner can isolate one transport for diagnosis"
 check_has "$RUNNER" 'cannot bypass only the proxy certificate' "runner explains the missing insecure proxy retry"
 check_lacks "$RUNNER" 'console.log' "runner never logs values with console.log"

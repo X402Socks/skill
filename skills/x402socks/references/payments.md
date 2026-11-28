@@ -1,8 +1,22 @@
 # x402 payment flow
 
-Reference for buying x402socks access. Prices are illustrative - read
-`/catalog.json` and the live 402 challenge. For wallet and signer paths, see
-`wallet.md`.
+Reference for agent-side x402 purchases of x402socks access. Prices are
+illustrative - read `/catalog.json` and the live 402 challenge. For wallet and
+signer paths, see `wallet.md`.
+
+A proxy token can also be obtained through the manual checkout at
+https://x402socks.com/buy: the operator creates an intent, sends the exact
+on-chain transfer, and saves the package-bound token locally after confirmation.
+That path does not use the x402 approval flow below. Do not invent an x402
+approval record for a manual payment; if the agent has no usable signer, stop and
+provide the manual checkout URL. Never place a token in chat, argv, URLs, or logs.
+
+The token is reusable within the purchased plan; it is not consumed by the
+payment, a request, or a session. Most packages are cheap and expire within
+hours, so a token is normally spent in one session or a few sessions over a few
+hours. Keep one token per agent or job to keep agent memory and context small
+and to avoid cross-contamination between agents. Only the x402 approval is
+one-use.
 
 ## 1. The challenge
 
@@ -658,8 +672,9 @@ transcript, or log.
 message with a fresh timestamp and prints the exact `recover` command to run with
 that same timestamp.
 
-## 8. No wallet = no purchase
+## 8. No agent wallet = no x402 purchase
 
 The x402 flow needs a signer with USDC on Base. If the agent has no wallet access,
-it cannot buy a package; there is no free tier. See `wallet.md` for browser,
-signer-owned, and optional `cast` paths. Missing `cast` is not a blocker.
+it cannot buy through x402; there is no free tier. Offer the manual checkout at
+https://x402socks.com/buy instead. See `wallet.md` for browser, signer-owned, and
+optional `cast` paths. Missing `cast` is not a blocker.

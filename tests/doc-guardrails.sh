@@ -7,13 +7,14 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_README="$ROOT/README.md"
 SKILL="$ROOT/skills/x402socks/SKILL.md"
 PAY="$ROOT/skills/x402socks/references/payments.md"
 END="$ROOT/skills/x402socks/references/endpoints.md"
 TROUBLE="$ROOT/skills/x402socks/references/troubleshooting.md"
 APPROVAL="$ROOT/skills/x402socks/assets/purchase-approval.md"
 
-for f in "$SKILL" "$PAY" "$END" "$TROUBLE" "$APPROVAL"; do
+for f in "$ROOT_README" "$SKILL" "$PAY" "$END" "$TROUBLE" "$APPROVAL"; do
   [ -f "$f" ] || { echo "missing $f" >&2; exit 2; }
 done
 
@@ -35,7 +36,7 @@ check_lacks() {
 check_has "$APPROVAL" "Exact request URL" "approval template binds request URL"
 check_has "$APPROVAL" "Expected \`resource.url\`" "approval template binds challenge resource"
 check_has "$APPROVAL" "Actual signer object" "approval template binds signer"
-check_has "$APPROVAL" "Reconciliation, single use, and retries" "approval template covers reconciliation and reuse"
+check_has "$APPROVAL" "Reconciliation, approval single use, and retries" "approval template distinguishes one-use approval from reusable token"
 check_has "$APPROVAL" ".consumed" "approval template requires exclusive consumption marker"
 check_has "$APPROVAL" "new explicit approval" "approval template requires fresh approval"
 
@@ -51,6 +52,8 @@ check_has "$TROUBLE" "fresh explicit approval" "troubleshooting requires fresh a
 check_has "$TROUBLE" "X402SOCKS_ALLOWED_HOSTS" "troubleshooting enforces target allowlist"
 check_has "$TROUBLE" "context.route(\"**/*\")" "troubleshooting covers full browser traffic interception"
 check_has "$TROUBLE" "validate" "troubleshooting reconciles an existing token first"
+check_has "$TROUBLE" "agent-first chain" "troubleshooting states the agent-first transport order"
+check_has "$TROUBLE" "manual checkout" "troubleshooting offers manual acquisition without an agent signer"
 
 check_has "$SKILL" "## Target authorization (hard)" "skill states target authorization rule"
 check_has "$SKILL" "X402SOCKS_ALLOWED_HOSTS" "skill requires an explicit target allowlist"
@@ -58,9 +61,21 @@ check_has "$SKILL" "fresh explicit approval" "skill requires fresh approval for 
 check_has "$SKILL" "not just the URL you" "skill requires full-traffic target checks"
 check_has "$SKILL" "cap is" "skill states the spending cap is required"
 check_has "$SKILL" "UNTRUSTED PROVIDER DATA" "skill treats provider text as data"
-check_has "$SKILL" "version: 1.4.0" "skill version is 1.4.0"
-check_has "$SKILL" "SOCKS5 on **1080** first" "skill states the SOCKS5-first chain"
+check_has "$SKILL" "version: 1.4.1" "skill version is 1.4.1"
+check_has "$SKILL" "## Invocation contract" "skill documents no-arg and package invocation"
+check_has "$SKILL" "https://x402socks.com/buy" "skill documents the manual acquisition path"
+check_has "$SKILL" "Both SOCKS5 and CONNECT TLS are native transports" "skill states the agent-first transport policy"
+check_has "$SKILL" "request does not consume the token" "skill warns that plaintext CONNECT does not burn the token"
+check_has "$SKILL" "reusable within the purchased plan" "skill states the token lifecycle"
+check_has "$SKILL" "avoid cross-contamination between agents" "skill explains per-agent token hygiene"
+check_lacks "$SKILL" "treat the token as single-use" "skill no longer calls the token single-use"
 check_has "$SKILL" "scripts/eip191_verify.py\` needs no extra install" "skill documents the dependency-free verifier"
+check_has "$ROOT_README" "An agent-first skill" "root README uses agent-first positioning"
+check_has "$ROOT_README" "Tokens are reusable within the purchased plan" "root README states the token lifecycle"
+check_has "$ROOT_README" "rate-limited or region-restricted" "root README covers scrapers and web tools"
+check_has "$ROOT_README" "avoid cross-contamination between agents" "root README explains per-agent token hygiene"
+check_has "$ROOT_README" "x402socks time_6h" "root README documents direct package invocation"
+check_has "$ROOT_README" "https://x402socks.com/buy" "root README documents manual acquisition"
 
 check_has "$END" "X402SOCKS_ALLOWED_HOSTS" "client snippets require target allowlist"
 check_has "$END" "curl -q" "manual curl examples ignore ambient config"
@@ -96,12 +111,15 @@ else
   bad "a documented curl invocation does not start with curl -q"
 fi
 
-if grep -q '"version": "1.4.0"' "$ROOT/.claude-plugin/plugin.json" &&
-   grep -q '"version": "1.4.0"' "$ROOT/.claude-plugin/marketplace.json"; then
-  pass "plugin manifests are version 1.4.0"
+if grep -q '"version": "1.4.1"' "$ROOT/.claude-plugin/plugin.json" &&
+   grep -q '"version": "1.4.1"' "$ROOT/.claude-plugin/marketplace.json"; then
+  pass "plugin manifests are version 1.4.1"
 else
-  bad "plugin manifests are not version 1.4.0"
+  bad "plugin manifests are not version 1.4.1"
 fi
+
+check_has "$ROOT/.claude-plugin/plugin.json" "reusable package-bound tokens" "plugin description states the token lifecycle"
+check_has "$ROOT/.claude-plugin/marketplace.json" "native SOCKS5 and CONNECT TLS" "marketplace description states native transports"
 
 if [ "$fail" = 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT" >&2; fi
 exit "$fail"

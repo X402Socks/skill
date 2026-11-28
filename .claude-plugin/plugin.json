@@ -1,7 +1,7 @@
 {
   "name": "x402socks",
-  "description": "Buy and use proxy egress for agents over SOCKS5 with HTTP CONNECT fallbacks, paid per job in USDC with x402.",
-  "version": "1.4.0",
+  "description": "Agent-first paid proxy egress packages: reusable package-bound tokens from x402 or manual checkout; native SOCKS5 and CONNECT TLS, plaintext CONNECT only as a last resort.",
+  "version": "1.4.1",
   "author": {
     "name": "x402socks"
   },

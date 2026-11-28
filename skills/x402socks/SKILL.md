@@ -1,32 +1,63 @@
 ---
 name: x402socks
-description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or privacy for an authorized fetch, for example "get a proxy", "route this through a proxy", "rotate my IP", "fetch from a specific region", "pay for proxy egress with USDC", "x402 proxy", or "x402socks". It buys pay-per-use proxy egress from x402socks.com over SOCKS5 with HTTP CONNECT fallbacks, paid in USDC on Base with the x402 protocol. Use it only for targets you are explicitly authorized to access and only within their access rules.
+description: Use this skill when an agent needs a different source IP, rotating or geo-specific egress, or privacy for an authorized fetch, for example "get a proxy", "route this through a proxy", "rotate my IP", "fetch from a specific region", "pay for proxy egress with USDC", "x402 proxy", or "x402socks". It provides agent-first paid proxy egress packages from x402socks.com with native SOCKS5 and CONNECT TLS, plus plaintext HTTP CONNECT only as a last resort; package-bound reusable tokens come from x402 payments in Base USDC or documented manual checkout. Use it only for targets you are explicitly authorized to access and only within their access rules.
 license: MIT
 metadata:
   author: x402socks
-  version: 1.4.0
+  version: 1.4.1
   homepage: https://x402socks.com
 ---
 
 # x402socks proxy access
 
-Buy private proxy egress for an agent, paid per job in USDC on Base through
-**x402** (HTTP 402). No signup, no email, no card. The payment returns a one-time
-proxy token; use it as **both** the proxy username and password. The proxy only
-changes the network path, it does not grant permission to access a target.
+Get short-lived, paid proxy egress packages for an agent. Clients connect
+directly to an exit node and use a package-bound proxy token as **both** the
+proxy username and password, so the destination sees the exit address. A token
+can come from **x402** (HTTP 402) payments in USDC on Base or from the
+documented manual checkout at https://x402socks.com/buy. No account signup is
+required by the skill. The proxy only changes the network path; it does not
+grant permission to access a target.
 
-Transport order is fixed: SOCKS5 on **1080** first, TLS HTTP CONNECT on **3129**
-second, plaintext HTTP CONNECT on **3128** last. CONNECT listeners are
-compatibility hops and may not exist on every exit; a failure moves to the next
-hop and never to a direct connection. Target HTTPS certificate verification stays
-on for every hop. Only after all three fail may an operator explicitly set
+A token is **reusable within the purchased plan**; it is not consumed by one
+request or one session. Most packages are cheap and expire within hours, so one
+token is typically used in a single session or a few sessions over a few hours.
+Prefer one token per agent or job to keep agent memory and context small and to
+avoid cross-contamination between agents. That is operational hygiene, not only
+a security precaution. The x402 approval is one-use; the token it buys is not.
+
+Both SOCKS5 and CONNECT TLS are native transports. Selection order is SOCKS5 on
+**1080** when the client supports it, then CONNECT + TLS on **3129**, then
+plaintext HTTP CONNECT on **3128** only if no secure channel works. Plaintext
+exposes the CONNECT target and the token on the client-to-exit hop, so use a
+short-lived token there and prefer a fresh token for another agent or job; the
+request does not consume the token. Listener availability is exit-dependent; a
+failure moves to the next allowed hop and never to a direct connection. Target
+HTTPS certificate verification stays on for every hop. Only after the normal
+chain fails may an operator explicitly set
 `X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1` to retry the TLS CONNECT hop without
 verifying the proxy certificate. That opt-in is proxy-only, warned, and never
 affects provider API requests or target TLS verification.
 
-## Before you start: wallet access (required)
+## Invocation contract
 
-The agent cannot buy anything without a wallet it can use.
+1. **No package argument:** read `/catalog.json`, return the available packages
+   with IDs, prices, and entitlements, and ask which package to use. After the
+   user chooses, explain both acquisition paths: x402 when a usable signer is
+   available, and the manual checkout at https://x402socks.com/buy. Do not buy
+   before the package is selected.
+2. **`<package>` argument:** treat it as the selected package and do not ask
+   again. With a usable signer, proceed directly through quote → operator-signed
+   one-use approval → live 402 validation → x402 payment → local token save.
+   Without a usable signer, stop with the manual checkout URL and never ask the
+   user to choose the package a second time.
+3. **Manual token:** the operator completes the exact on-chain transfer in the
+   checkout and saves the returned token locally in mode `0600`. Never ask the
+   operator to paste a token into chat, argv, a URL, or an agent-visible file.
+
+## Before you start: wallet access for x402 purchases
+
+The agent cannot buy through x402 without a wallet it can use. Manual checkout
+is the alternative when no agent-usable signer is available.
 
 - **Wallet:** an EVM-compatible wallet funded with **USDC on Base**. The cheapest
   package is **$1.00** (6 hours, 1 GB). No ETH is needed for an x402 purchase:
@@ -44,8 +75,9 @@ The agent cannot buy anything without a wallet it can use.
 - **Never** print, echo, log, or pass the private key as a command argument. It
   must not appear in a terminal transcript, process list, log, or commit. Keep
   key material at mode `0600`.
-- **No wallet access = no purchase.** There is no free trial and no way to use
-  the wallet without a signer. Missing `cast` is not a blocker.
+- **No agent wallet = no x402 purchase.** There is no free trial and no way to
+  use the wallet without a signer. Offer https://x402socks.com/buy for manual
+  acquisition instead. Missing `cast` is not a blocker.
 
 `references/wallet.md` covers browser-wallet and signer-owned paths. `cast`
 recipes are optional compatibility examples.
@@ -142,10 +174,12 @@ unless the job clearly needs more; re-read `/catalog.json` for current packages.
 ## Using the token
 
 ```bash
-# Helper: SOCKS5 first, then TLS and plaintext CONNECT; token stays out of argv
+# Helper: SOCKS5 when available, then CONNECT + TLS, then plaintext last resort
 scripts/x402socks.sh check-exit eu-north1
 scripts/x402socks.sh test eu-north1
 scripts/x402socks.sh test eu-north1 --tls               # force one transport
+# If the helper reports transport: plaintext, use a short-lived token and prefer
+# a fresh token for another agent or job; the request does not consume it.
 
 # One strict command. The helper validates the token and exit, clears ambient
 # proxy bypass variables, forces HTTPS with no redirects, consumes the
@@ -199,8 +233,10 @@ browser with the proxy.
 - Never echo a token into a chat, transcript, or commit. If one appears in
   output, treat it as burned and rotate it.
 - Use the fixed transport chain only; never send a target request directly.
-  Rotate on suspicion: `scripts/x402socks.sh rotate` invalidates the old token
-  immediately and saves the replacement without printing it.
+  Plaintext CONNECT is an exposed hop: finish only the approved job, use a
+  short-lived token, and prefer a fresh token for the next agent or job. Rotate
+  on any suspicion of exposure too: `scripts/x402socks.sh rotate` invalidates
+  the old token immediately and saves the replacement without printing it.
 - Credential-bearing requests only go to `https://` x402socks hosts. The helper
   refuses any other host before reading the token, even when the certificate is
   valid, and pins curl to HTTPS. `X402SOCKS_ALLOW_INSECURE_API=1` is for a
@@ -209,8 +245,10 @@ browser with the proxy.
 ## Gotchas
 
 - `/nodes.json` is live; never hardcode the exit list or assume how many exist.
-- Single packages allow **one active session**. Use `multi_agent` for parallel
-  agents.
+- Tokens are package-bound and reusable until the plan's time, data, or session
+  limits end. Single packages allow **one active session**; use `multi_agent`
+  for intentional parallel agents. One token per agent or job is the default
+  hygiene practice.
 - Data caps are fair use; sustained bulk transfer may be throttled.
 - Failed connections are non-refundable by default; validate first.
 - 402 amounts are atomic USDC (6 decimals): `"1000000"` = $1.00. The approved

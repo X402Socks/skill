@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression test for Skillstore audit v7 medium plus v1.4.0 transport order.
+# Regression test for Skillstore audit v7 medium plus v1.4.1 transport order.
 # The helper must ignore ambient curl config and NO_PROXY, try SOCKS5 then TLS
 # CONNECT then plaintext CONNECT, fetch a direct baseline only with consent, and
 # fail when the egress IP is unchanged. Runs offline with a fake curl.

@@ -329,7 +329,7 @@ else
 fi
 
 # 6. Documentation enforces the same contract.
-check_has "$SKILL" "version: 1.4.0" "skill version is 1.4.0"
+check_has "$SKILL" "version: 1.4.1" "skill version is 1.4.1"
 check_has "$SKILL" "UNTRUSTED PROVIDER DATA" "skill labels provider output"
 check_has "$SKILL" '"state":"inconclusive"' "skill names the inconclusive reconcile state"
 check_has "$SKILL" "set -e" "skill shell example is fail-fast"
@@ -380,8 +380,8 @@ check_has "$APPROVAL" ".consumed" "approval template uses an exclusive one-use m
 check_has "$APPROVAL" "Actual signer object" "approval template binds the actual signer"
 check_lacks "$APPROVAL" "<approval-file>.consumed" "approval template no longer marks a path"
 
-check_has "$PLUGIN" '"version": "1.4.0"' "plugin manifest is 1.4.0"
-check_has "$MARKETPLACE" '"version": "1.4.0"' "marketplace manifest is 1.4.0"
+check_has "$PLUGIN" '"version": "1.4.1"' "plugin manifest is 1.4.1"
+check_has "$MARKETPLACE" '"version": "1.4.1"' "marketplace manifest is 1.4.1"
 
 if [ "$fail" = 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT" >&2; fi
 exit "$fail"

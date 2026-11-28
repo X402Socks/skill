@@ -1,23 +1,39 @@
 # x402socks skill
 
-An agent skill for [x402socks.com](https://x402socks.com): SOCKS5-first proxy
-egress for authorized agent traffic, bought per job in USDC on Base through the
-[x402](https://x402.org) protocol. No signup, no card. The agent quotes a price,
-pays after explicit approval, receives a one-time proxy token, and routes
-authorized traffic through a healthy exit.
+An agent-first skill for [x402socks.com](https://x402socks.com): short-lived,
+paid proxy egress packages for authorized agent traffic. Clients connect
+directly to an exit node and present a package-bound proxy token, so the
+destination sees the exit address. Tokens are reusable within the purchased plan,
+not one-use. Most packages are cheap and expire within hours, so one token
+is typically spent in a single session or a few sessions over a few hours. Use
+a separate token for each agent or job to keep agent memory and context small
+and avoid cross-contamination between agents; this is operational hygiene, not
+only a security precaution. Tokens can be obtained through
+[x402](https://x402.org) payments in USDC on Base or by the documented
+[manual checkout](https://x402socks.com/buy). No account signup is required by
+the skill. The agent discovers packages, confirms the exact terms, obtains or
+guides acquisition of a token, stores it locally, and routes only authorized
+traffic through a healthy exit.
 
-Transport order is fixed: SOCKS5 on `1080`, TLS HTTP CONNECT on `3129`, then
-plaintext HTTP CONNECT on `3128`. CONNECT hops are compatibility fallbacks and
-may not exist on every exit. Target TLS verification stays on. A proxy-only
-certificate bypass requires an explicit operator opt-in after all three hops
-fail.
+Both SOCKS5 and CONNECT TLS are native transports. Prefer SOCKS5 when the client
+supports it, then CONNECT + TLS; use plaintext HTTP CONNECT only when no secure
+channel works. Plaintext exposes the CONNECT target and proxy credentials on the
+client-to-exit hop, so use a short-lived token there and prefer a fresh token
+for another agent or job; the request does not consume the token. Listener
+availability is exit-dependent; never assume a CONNECT listener is present on
+every exit. Target TLS verification stays on. A proxy-only certificate bypass
+requires an explicit operator opt-in after the normal transport chain fails.
 
 **Repository:** [github.com/X402Socks/skill](https://github.com/X402Socks/skill)
 **Directory:** [skills.sh/X402Socks/skill](https://skills.sh/X402Socks/skill)
 
-## Wallet access (required)
+## Wallet access for agent-side x402 purchases
 
-The agent must be given a wallet it can sign with. There is no free tier.
+For the skill to buy a package with x402, the agent must be given a wallet it can
+sign with. There is no free tier. A token can also be obtained through the
+[manual checkout](https://x402socks.com/buy), where the operator handles the
+on-chain transfer and saves the resulting token locally; that path does not give
+the agent wallet access.
 
 - **Wallet:** an EVM-compatible wallet funded with **USDC on Base**. The cheapest
   package is **$1.00** for 6 hours / 1 GB. No ETH is needed for an x402 purchase
@@ -45,6 +61,9 @@ are optional compatibility examples, not a requirement.
 - **Agents that need a different source IP** for an authorized target, such as
   geo-specific egress or a network path from a different provider. Targets must
   allow automated access.
+- **People running scrapers or web tools** whose authorized targets are
+  rate-limited or region-restricted from their current network, provided the
+  target's terms and access rules allow that access.
 - **Developers running autonomous agents** that can acquire network access with
   a spending guardrail built in.
 - **People evaluating x402** with a complete purchase loop rather than a demo.
@@ -67,12 +86,20 @@ cp -r skills/x402socks ~/.claude/skills/
 cp -r skills/x402socks ~/.agents/skills/
 ```
 
-Then ask:
+Then invoke the skill with a package or without one:
 
-> "Get me a proxy so I can fetch example.com from a French IP."
+> `x402socks` — list the current packages with IDs, prices, and entitlements, then
+> ask which package to use. After the choice, explain the x402 path (when a usable
+> signer is available) and the manual checkout path.
 
-The agent checks the catalog, reports price and terms, waits for signed approval,
-completes the x402 payment, and routes only authorized traffic.
+> `x402socks time_6h` — use that package without asking again. With a usable
+> signer, go through the guarded quote → one-use approval → x402 payment → local
+> token-save flow. Without one, stop with the manual checkout URL rather than
+> requesting another package choice.
+
+For a job, also give the agent the exact authorized target and let it verify the
+egress change. It never buys before the operator-approved terms match the live
+challenge.
 
 ### What it will and won't do
 

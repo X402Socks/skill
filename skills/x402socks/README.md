@@ -1,23 +1,40 @@
 # x402socks skill
 
-An [Agent Skill](https://agentskills.io) for buying short-lived proxy egress
-from a different source IP or a specific region for targets you are authorized
-to access. It pays in USDC on Base through [x402](https://x402.org).
+An [Agent Skill](https://agentskills.io) for agent-first, paid proxy egress
+packages from a different source IP or a specific region for targets you are authorized
+to access. Clients connect directly to an exit node with a
+package-bound proxy token. Tokens can be obtained through
+[x402](https://x402.org) payments in USDC on Base or by the documented
+[manual checkout](https://x402socks.com/buy).
 
-Transport order is fixed: SOCKS5 on `1080`, TLS HTTP CONNECT on `3129`, then
-plaintext HTTP CONNECT on `3128`. CONNECT hops are compatibility fallbacks and
-may not exist on every exit. Target TLS verification stays on. A proxy-only
-certificate bypass requires an explicit operator opt-in after all three hops
-fail.
+A token is reusable within the purchased plan, not one-use. Most packages are
+short-lived and cheap, so a token is commonly used in a single session or a few
+sessions over a few hours. Prefer one token per agent or job to keep agent
+memory and context small and avoid cross-contamination between agents; that is
+operational hygiene, not only a security precaution. The x402 payment approval
+is one-use, but the token it buys is not consumed by a request.
 
-The skill teaches an agent to quote a package, get signed approval for exact
-terms, complete the x402 v2 payment, store the one-time token safely, route
-traffic through a chosen exit, and verify that egress changed.
+Both SOCKS5 and CONNECT TLS are native transports. Prefer SOCKS5 when the client
+supports it, then CONNECT + TLS; use plaintext HTTP CONNECT only when no secure
+channel works. Plaintext exposes credentials on the client-to-exit hop, so use a
+short-lived token there and prefer a fresh token for another agent or job.
+Listener availability is exit-dependent. Target TLS verification stays on. A
+proxy-only certificate bypass requires an explicit operator opt-in after the
+normal chain fails.
 
-## Wallet access (required)
+With no package argument, the agent lists current packages and asks which one to
+use, then explains the x402 or manual acquisition path. With a package argument,
+it does not ask again: with a usable signer it follows the guarded x402 purchase
+flow; otherwise it stops with the manual checkout URL. The skill teaches the
+agent to quote exact terms, get one-use signed approval for x402 payments, store
+the token safely, route traffic through a chosen exit, and verify egress changed.
 
-The agent cannot use this skill without a wallet it can sign with. There is no
-free tier and no account credit.
+## Wallet access for agent-side x402 purchases
+
+The agent cannot buy through x402 without a wallet it can sign with. There is no
+free tier and no account credit. The manual checkout at
+https://x402socks.com/buy is the alternative when the agent has no signer; the
+operator completes that transfer and saves the resulting token locally.
 
 1. **An EVM-compatible wallet funded with USDC on Base.** The cheapest package is
    $1.00 for 6 hours / 1 GB. USDC on Base is
@@ -86,12 +103,15 @@ cp -r skills/x402socks ~/.agents/skills/       # OpenCode and other clients
   x402socks origins with exact ports. Public discovery origins are validated too.
   `X402SOCKS_ALLOW_INSECURE_API=1` is for a trusted loopback test only and is
   separate from the proxy TLS opt-in.
-- **Transport:** all traffic goes through the proxy. SOCKS5 is first, TLS
-  CONNECT is second, plaintext CONNECT is last. The helper clears ambient proxy
-  bypass settings, pins HTTPS targets, and disables redirects. The browser
-  runner blocks service workers, disables WebRTC, allows every request and
-  redirect through an exact host and port allowlist, and rechecks the final URL
-  on each transport attempt.
+- **Transport:** all traffic goes through the proxy. Prefer SOCKS5, then CONNECT
+  + TLS, then plaintext CONNECT only as a last resort. Plaintext exposure calls
+  for a short-lived token and a fresh token for the next agent or job; the token
+  itself is package-bound and reusable within the plan. The helper clears
+  ambient proxy bypass settings, pins HTTPS targets, and disables redirects.
+  The browser runner blocks service workers, disables WebRTC, allows every
+  request and redirect
+  through an exact host and port allowlist, and rechecks the final URL on each
+  transport attempt.
 
 ## Links
 

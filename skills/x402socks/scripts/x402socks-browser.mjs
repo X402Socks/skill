@@ -23,8 +23,11 @@ const MAX_TOKEN_BYTES = 4096;
 const CONTROL = /[\u0000-\u001F\u007F]/;
 const EXIT_ID = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const TOKEN_CHARS = /^[A-Za-z0-9_-]+$/;
-// SOCKS5 is the primary transport. The CONNECT listeners are compatibility
-// fallbacks. An insecure TLS proxy retry is deliberately absent here: Playwright
+// Agent-first transport order: use SOCKS5 when available, then CONNECT + TLS,
+// then plaintext CONNECT only as a last resort. Plaintext exposes the token on
+// the client-to-exit hop, so prefer a short-lived, per-agent token there; the
+// token is package-bound and reusable within the plan, not consumed by a request.
+// An insecure TLS proxy retry is deliberately absent here: Playwright
 // cannot bypass only the proxy certificate, and target TLS verification stays on.
 const PROXY_TRANSPORTS = [
   { name: "socks5", server: (exitId) => `socks5://${exitId}.x402socks.com:1080` },
@@ -36,7 +39,7 @@ const HOP_BY_HOP = new Set([
   "keep-alive",
   "proxy-authenticate",
   "proxy-authorization",
-  "te",
+  "te", // codespell:ignore te
   "trailer",
   "transfer-encoding",
   "upgrade",
@@ -276,6 +279,11 @@ async function attemptFetch({ exitId, target, output, token, allowlist, transpor
     process.stderr.write(
       `status: ok\ntransport: ${transport.name}\nbytes: ${capped.length}\ntruncated: ${truncated ? "true" : "false"}\n`
     );
+    if (transport.name === "plaintext") {
+      process.stderr.write(
+        "WARNING: plaintext CONNECT exposes proxy credentials on this hop; use a short-lived token and prefer a fresh token for another agent or job; the request does not consume the token\n"
+      );
+    }
     return true;
   } catch (error) {
     if (error instanceof Stop || refusal) {

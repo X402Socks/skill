@@ -549,9 +549,10 @@ x402socks helper
   save-token                    read a token from stdin and store it (mode 600)
   check-exit <exit_id>          confirm an exit id is usable from /nodes.json
   curl <exit_id> <target_url>   fetch an allowlisted HTTPS target through the
-                                  SOCKS5 1080 default, then TLS CONNECT 3129,
-                                  then plaintext CONNECT 3128; credentials stay
-                                  inside the helper and never reach stdout or argv
+                                  agent-first chain: SOCKS5 1080 when available,
+                                  then CONNECT + TLS 3129, then plaintext
+                                  CONNECT 3128 only as a last resort; credentials
+                                  stay inside the helper and never reach stdout or argv
   status                        account status and usage
   validate                      cheap token check (exit 0 = valid)
   reconcile                     three-state check for purchases: exit 0 = valid
@@ -590,10 +591,13 @@ Approval verification (operator-provisioned, outside agent write scope):
                                 eip191_verify.py needs no extra install
 
 Transport selection:
-  X402SOCKS_PROXY_TRANSPORT     socks5 (default), tls, or plaintext; forces one
-                                transport instead of the fallback chain
+  X402SOCKS_PROXY_TRANSPORT     socks5 (preferred), tls, or plaintext; forces one
+                                transport instead of the fallback chain;
+                                plaintext is last resort and calls for a
+                                short-lived token, but the request does not
+                                consume the token
   X402SOCKS_ALLOW_INSECURE_PROXY_TLS=1
-                                after all three transports fail, retry only the
+                                after the normal chain fails, retry only the
                                 TLS CONNECT hop without proxy certificate
                                 verification; target TLS verification is kept
 
@@ -1033,10 +1037,13 @@ assert_token_valid() {
   [ "$code" = "204" ] || die "token is not valid before fetch (HTTP $code)"
 }
 
-# Proxy dialects are tried in a fixed order. SOCKS5 is the default. TLS HTTP
-# CONNECT on 3129 is the CONNECT fallback, plaintext CONNECT on 3128 is last,
-# and a separate explicit opt-in can retry TLS without verifying only the proxy
-# certificate. Target TLS verification and the destination allowlist never change.
+# Proxy dialects are tried in an agent-first order. Use SOCKS5 when available,
+# then CONNECT + TLS on 3129, then plaintext CONNECT on 3128 only as a last
+# resort. Plaintext exposes the token on the client-to-exit hop, so prefer a
+# short-lived, per-agent token there; the token is package-bound and reusable
+# within the plan, not consumed by a request. A separate explicit opt-in can
+# retry TLS without verifying only the proxy certificate. Target TLS
+# verification and the destination allowlist never change.
 valid_proxy_transport() {
   case "$1" in
     socks5|tls|tls-insecure|plaintext) return 0 ;;
@@ -1096,6 +1103,9 @@ fetch_with_fallbacks() {
     if code="$(attempt_proxy_fetch "$exit_id" "$target" "$transport" \
                 "$token" "$body_file")"; then
       note "transport: $transport (HTTP $code)"
+      if [ "$transport" = "plaintext" ]; then
+        note "WARNING: plaintext CONNECT exposes proxy credentials on this hop; use a short-lived token and prefer a fresh token for another agent or job; the request does not consume the token"
+      fi
       cat "$body_file" > "$output_file"
       [ -n "$transport_file" ] && printf '%s\n' "$transport" > "$transport_file"
       rm -f "$body_file"
